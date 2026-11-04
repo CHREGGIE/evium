@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Evium CRM</title>
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'><path fill='%2310b981' d='M13 2 4 14h7l-1 8 9-12h-7z'/></svg>">
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <div id="login" class="login hidden">
+    <form id="loginForm" class="login-card">
+      <div class="brand big"><span class="bolt">⚡</span> Evium <small>CRM</small></div>
+      <p class="muted">Staff sign-in · eviumcharging.com</p>
+      <label>Email<input name="email" type="email" required autocomplete="username"></label>
+      <label>Password<input name="password" type="password" required autocomplete="current-password"></label>
+      <div id="loginError" class="error"></div>
+      <button class="btn primary" type="submit">Sign in</button>
+    </form>
+  </div>
+
+  <div id="shell" class="shell hidden">
+    <aside class="sidebar">
+      <div class="brand"><span class="bolt">⚡</span> Evium <small>CRM</small></div>
+      <nav>
+        <a href="#/dashboard" data-nav="dashboard">Dashboard</a>
+        <a href="#/pipeline" data-nav="pipeline">Pipeline</a>
+        <a href="#/projects" data-nav="projects">Projects</a>
+        <a href="#/tickets" data-nav="tickets">Tickets</a>
+        <a href="#/admin" data-nav="admin" class="admin-only">Admin</a>
+      </nav>
+      <div class="me">
+        <div id="meName"></div>
+        <button class="link" id="changePw">Change password</button>
+        <button class="link" id="logout">Sign out</button>
+      </div>
+    </aside>
+    <main id="view" class="view"></main>
+  </div>
+
+  <div id="modal" class="modal hidden"><div class="modal-card" id="modalCard"></div></div>
+  <div id="toast" class="toast hidden"></div>
+  <script src="/app.js"></script>
+</body>
+</html>

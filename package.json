@@ -1,0 +1,29 @@
+{
+  "name": "evium-crm",
+  "version": "1.0.0",
+  "description": "Project CRM & ticketing admin for Evium Charging (EV charge point operator)",
+  "main": "src/server.js",
+  "scripts": {
+    "start": "node src/server.js",
+    "dev": "node --watch src/server.js",
+    "seed": "node src/seed.js"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/CHREGGIE/evium.git"
+  },
+  "license": "UNLICENSED",
+  "bugs": {
+    "url": "https://github.com/CHREGGIE/evium/issues"
+  },
+  "homepage": "https://github.com/CHREGGIE/evium#readme",
+  "dependencies": {
+    "better-sqlite3": "^13.0.3",
+    "express": "^4.22.3",
+    "multer": "^2.5.0"
+  },
+  "private": true,
+  "engines": {
+    "node": ">=18"
+  }
+}
