@@ -30,6 +30,8 @@ npm run seed      # optional: loads demo projects & staff (password: changeme123
 npm start         # http://localhost:3000
 ```
 
+Forgot the admin password? Run `npm run reset-admin -- NewPassword123`.
+
 The first time it starts, the app creates an admin account and prints the login to the console:
 `admin@eviumcharging.com` with a randomly generated password. To choose the login yourself, set `ADMIN_EMAIL` and `ADMIN_PASSWORD` before the first start.
 
