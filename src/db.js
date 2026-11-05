@@ -2,14 +2,23 @@
 const path = require('path');
 const fs = require('fs');
 const crypto = require('crypto');
-const Database = require('better-sqlite3');
+// Node's built-in SQLite (Node 22.13+). Silence its "experimental" notice.
+const _emit = process.emitWarning;
+process.emitWarning = (w, ...a) => (String(w).includes('SQLite') ? undefined : _emit.call(process, w, ...a));
+const { DatabaseSync } = require('node:sqlite');
+process.emitWarning = _emit;
 
 const DATA_DIR = process.env.DATA_DIR || path.join(__dirname, '..', 'data');
 fs.mkdirSync(DATA_DIR, { recursive: true });
 
-const db = new Database(path.join(DATA_DIR, 'evium-crm.db'));
-db.pragma('journal_mode = WAL');
-db.pragma('foreign_keys = ON');
+const db = new DatabaseSync(path.join(DATA_DIR, 'evium-crm.db'));
+db.exec('PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 5000;');
+
+// better-sqlite3-style transaction helper: db.transaction(fn)(...args)
+db.transaction = (fn) => (...args) => {
+  db.exec('BEGIN');
+  try { const r = fn(...args); db.exec('COMMIT'); return r; } catch (e) { db.exec('ROLLBACK'); throw e; }
+};
 
 db.exec(`
 CREATE TABLE IF NOT EXISTS users (

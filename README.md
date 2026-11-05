@@ -19,7 +19,7 @@ Only Evium staff sign in. Customers are stored as contacts on each project and n
 
 ## Tech
 
-Node.js 18+ with Express, SQLite (`better-sqlite3`) and Multer for uploads. The frontend is plain HTML, CSS and JS with no build step.
+Node.js 22.13+ with Express, SQLite (built into Node) and Multer for uploads. The frontend is plain HTML, CSS and JS with no build step.
 Everything (the database plus uploaded files) is stored in `./data`, so back up that folder.
 
 ## Run locally
