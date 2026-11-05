@@ -45,13 +45,14 @@ The first time it starts, the app creates an admin account and prints the login 
 | `MAX_UPLOAD_MB` | `50` | Per-file upload limit |
 | `ADMIN_EMAIL` / `ADMIN_PASSWORD` | – | Initial admin, used only when no users exist |
 
-## Deploy
+## Deploy (production)
 
-Use any host that gives you a persistent disk (a VPS, Render or Railway with a volume, Fly.io with a volume, and so on):
+On a Linux server with Docker, with the DNS for your domain pointing at it:
 
 ```bash
-docker build -t evium-crm .
-docker run -d -p 3000:3000 -v evium-data:/app/data -e ADMIN_PASSWORD='choose-a-strong-one' evium-crm
+cp .env.example .env      # set DOMAIN and ADMIN_PASSWORD
+docker compose up -d --build
 ```
 
-Put it behind HTTPS, for example at `crm.eviumcharging.com`. The session cookie gets the `Secure` flag automatically when the app is served over HTTPS.
+Caddy gets and renews the HTTPS certificate automatically. All data is stored in `./data` on the server, so back that folder up.
+See the handoff guide for the full step-by-step setup.
