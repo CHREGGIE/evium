@@ -47,7 +47,8 @@ const stateName = (code) => (US_STATES.find(([c]) => c === String(code || '').to
 const stateOptions = (sel) => options(sel && !US_STATES.some(([c]) => c === sel) ? [[sel, sel], ...US_STATES] : US_STATES, sel, { blank: '—' });
 // Due diligence checklist: these must be filled before a property can move to the pipeline
 const DD_CHECKS = [['property_owner', 'Property owner'], ['rebate_program', 'Rebate'], ['utility_company', 'Utility company']];
-const ddMissing = (p) => DD_CHECKS.filter(([k]) => !String(p[k] ?? '').trim());
+const ddHas = (p, k) => (k === 'rebate_program' && p.rebates?.length) || !!String(p[k] ?? '').trim();
+const ddMissing = (p) => DD_CHECKS.filter(([k]) => !ddHas(p, k));
 const phaseBadge = () => badge('ph-dd', 'Due diligence');
 // ---------- milestones ----------
 // Each project tracks every milestone on its own; they can be finished in any order.
@@ -69,7 +70,9 @@ const isFlagged = (p) => p.ms_overdue > 0 && OPEN_STATUSES.includes(p.status);
 const msEditor = (p) => `<div class="ms-editor">${S.meta.milestones.map((m, i) => {
   const x = p.milestones[i];
   return `<div class="ms-row ${x.overdue ? 'ms-overdue' : ''}">
-    <div class="ms-name"><button type="button" class="ms-chat" data-chat="${m.id}" data-pid="${p.id}" title="Open the ${esc(m.name)} chat"><span class="dot" style="background:${esc(m.color)}"></span><b>${esc(m.name)}</b><span class="ms-chat-n">💬${x.msg_count ? ` ${x.msg_count}` : ''}</span></button><span class="small ${x.overdue ? 'stale' : 'muted'}">${esc(msWhen(x))}</span></div>
+    <div class="ms-name"><button type="button" class="ms-chat" data-chat="${m.id}" data-pid="${p.id}" title="Open the ${esc(m.name)} chat"><span class="dot" style="background:${esc(m.color)}"></span><b>${esc(m.name)}</b><span class="ms-chat-n">💬${x.msg_count ? ` ${x.msg_count}` : ''}</span></button><span class="small ${x.overdue ? 'stale' : 'muted'}">${esc(msWhen(x))}</span>
+      ${x.docs_missing?.length ? `<span class="small doc-need" title="Upload this before marking it done">📎 needs ${x.docs_missing.map((c) => esc(label(c))).join(', ')}</span>` : ''}
+      <button type="button" class="ms-remind" data-remind="${m.id}" data-pid="${p.id}" title="Set a follow-up reminder" aria-label="Set a reminder for ${esc(m.name)}">⏰</button></div>
     <div class="seg" role="group" aria-label="${esc(m.name)}">${MS_STATUSES.map((s) => `<button type="button" class="${x.status === s ? `on is-${s}` : ''}" data-ms="${m.id}" data-pid="${p.id}" data-st="${s}" aria-pressed="${x.status === s}">${MS_LABEL[s]}</button>`).join('')}</div>
   </div>`;
 }).join('')}</div>`;
@@ -80,14 +83,24 @@ function bindMsEditor(root, after, findProject) {
     const proj = findProject(b.dataset.pid);
     if (proj) openChat(proj, Number(b.dataset.chat), () => after(proj));
   }));
+  $$('[data-remind]', root).forEach((b) => (b.onclick = (e) => {
+    e.stopPropagation();
+    const proj = findProject(b.dataset.pid);
+    if (proj) reminderModal(proj, Number(b.dataset.remind), () => after(proj));
+  }));
   $$('[data-ms]', root).forEach((b) => (b.onclick = async (e) => {
     e.stopPropagation();
     if (b.classList.contains('on')) return;
-    try {
+    const put = async () => {
       const saved = await api('PUT', `/api/projects/${b.dataset.pid}/milestones/${b.dataset.ms}`, { status: b.dataset.st });
       toast(saved.ms_complete ? `${saved.code}: all milestones finished 🎉` : 'Milestone updated');
       after(saved);
-    } catch (err) { fail(err); }
+    };
+    try { await put(); } catch (err) {
+      // a required document is missing: offer to upload it right here, then mark it done
+      if (err.data?.missing_docs) docUploadModal(b.dataset.pid, Number(b.dataset.ms), err.data.missing_docs, () => put().catch(fail));
+      else fail(err);
+    }
   }));
 }
 
@@ -98,7 +111,7 @@ async function api(method, url, body) {
   const res = await fetch(url, opt);
   if (res.status === 401 && url !== '/api/login') { showLogin(); throw new Error('Please sign in'); }
   const data = res.headers.get('content-type')?.includes('json') ? await res.json() : null;
-  if (!res.ok) throw new Error(data?.error || `Request failed (${res.status})`);
+  if (!res.ok) { const err = new Error(data?.error || `Request failed (${res.status})`); err.data = data; err.status = res.status; throw err; }
   return data;
 }
 
@@ -152,7 +165,8 @@ $('#loginForm').addEventListener('submit', async (e) => {
     await boot();
   } catch (err) { $('#loginError').textContent = err.message; }
 });
-$('#logout').addEventListener('click', async () => { await api('POST', '/api/logout').catch(() => {}); S.me = null; showLogin(); });
+$('#logout').addEventListener('click', async () => { await api('POST', '/api/logout').catch(() => {}); S.me = null; clearInterval(bellTimer); showLogin(); });
+$('#bell').addEventListener('click', () => openNotifications());
 $('#changePw').addEventListener('click', () => {
   const card = openModal(`${modalHead('Change password')}
     <form class="grid"><label>Current password<input type="password" name="current" required autocomplete="current-password"></label>
@@ -173,6 +187,7 @@ async function boot() {
   $('#shell').classList.remove('hidden');
   $('#meName').textContent = `${S.me.name}${S.me.role === 'admin' ? ' · admin' : ''}`;
   $$('.admin-only').forEach((el) => el.classList.toggle('hidden', S.me.role !== 'admin'));
+  startBell();
   route();
 }
 
@@ -192,6 +207,10 @@ async function route() {
     if (page === 'dashboard') await renderDashboard();
     else if (page === 'diligence') await renderDiligence();
     else if (page === 'pipeline') await renderPipeline();
+    else if (page === 'map') await renderMap();
+    else if (page === 'rebates') await renderRebates();
+    else if (page === 'utilities' && id) await renderUtility(id);
+    else if (page === 'utilities') await renderUtilities();
     else if (page === 'projects' && id) await renderProject(id);
     else if (page === 'projects') await renderProjects();
     else if (page === 'tickets') { await renderTickets(); if (id) openTicket(id, () => { history.replaceState(null, '', '#/tickets'); renderTickets(); }); }
@@ -200,6 +219,506 @@ async function route() {
   } catch (e) { view.innerHTML = `<div class="card empty">${esc(e.message)}</div>`; }
 }
 const qs = () => new URLSearchParams(location.hash.split('?')[1] || '');
+
+// ---------- territories ----------
+const myStates = () => String(S.me?.states || '').split(',').filter(Boolean);
+const inMyTerritory = (p) => !!p.state && myStates().includes(p.state);
+// your territory's sites first, everything else after (order otherwise unchanged)
+const territoryFirst = (rows) => (myStates().length ? [...rows.filter(inMyTerritory), ...rows.filter((p) => !inMyTerritory(p))] : rows);
+const territoryToggle = (on) => (myStates().length
+  ? `<button type="button" class="chip ${on ? 'active' : ''}" id="mineToggle" title="Only show ${esc(myStates().join(', '))}">★ My territory</button>` : '');
+
+// ---------- notifications ----------
+const NOTIF_ICON = { mention: '@', message: '💬', reminder: '⏰', reminder_set: '⏰', territory: '★' };
+let bellTimer = null;
+async function refreshBell() {
+  if (!S.me) return;
+  try {
+    const d = await api('GET', '/api/notifications');
+    S.notifs = d;
+    const n = $('#bellCount');
+    n.textContent = d.unread > 99 ? '99+' : d.unread;
+    n.classList.toggle('hidden', !d.unread);
+    document.title = d.unread ? `(${d.unread}) Evium CRM` : 'Evium CRM';
+  } catch { /* offline: try again next time */ }
+}
+function startBell() { refreshBell(); clearInterval(bellTimer); bellTimer = setInterval(refreshBell, 30000); }
+
+async function openNotifications() {
+  await refreshBell();
+  const d = S.notifs || { items: [], unread: 0 };
+  const card = openModal(`<div class="modal-head"><h2 style="margin:0">Notifications</h2>
+      <span style="display:flex;gap:8px;align-items:center">${d.unread ? '<button class="btn sm" id="readAll">Mark all read</button>' : ''}<button class="x" data-close aria-label="Close">×</button></span></div>
+    <div class="notif-list">${d.items.map((n) => `<button type="button" class="notif ${n.read_at ? '' : 'unread'}" data-n="${n.id}">
+        <span class="notif-icon">${NOTIF_ICON[n.kind] || '•'}</span>
+        <span class="notif-text">${esc(n.text)}<span class="muted small">${ago(n.created_at)}</span></span></button>`).join('')
+      || '<div class="empty">Nothing yet. You\'ll see @mentions, reminders, messages on your sites and new sites in your territory here.</div>'}</div>`);
+  $('#readAll', card)?.addEventListener('click', async () => { await api('POST', '/api/notifications/read', {}); await refreshBell(); closeModal(); toast('All caught up'); });
+  $$('[data-n]', card).forEach((b) => (b.onclick = async () => {
+    const n = d.items.find((x) => String(x.id) === b.dataset.n);
+    api('POST', '/api/notifications/read', { ids: [n.id] }).then(refreshBell).catch(() => {});
+    closeModal();
+    if (!n.project_id) return;
+    projectTab = ['mention', 'message'].includes(n.kind) ? 'chat' : projectTab;
+    const target = `#/projects/${n.project_id}`;
+    if (location.hash === target) route(); else location.hash = target;
+  }));
+}
+
+// ---------- @mentions ----------
+const activeUsers = () => S.meta.users.filter((u) => u.active);
+// highlight @names in an already-escaped message
+function markMentions(html) {
+  const names = activeUsers().flatMap((u) => [u.name, u.name.split(/\s+/)[0]]).filter((x, i, a) => x && a.indexOf(x) === i)
+    .sort((a, b) => b.length - a.length).map((x) => esc(x).replace(/[.*+?^${}()|[\]\\]/g, '\\$&'));
+  if (!names.length) return html;
+  return html.replace(new RegExp(`(^|[^\\w@])@(${names.join('|')})(?![\\w])`, 'gi'), '$1<span class="mention">@$2</span>');
+}
+// little pop-up list of people while typing "@ma…"
+function attachMentionPicker(ta) {
+  const box = document.createElement('div');
+  box.className = 'mention-pop hidden';
+  ta.parentElement.style.position = 'relative';
+  ta.parentElement.appendChild(box);
+  let matches = []; let idx = 0;
+  const word = () => { const m = ta.value.slice(0, ta.selectionStart).match(/(^|\s)@([\w.-]*)$/); return m ? m[2] : null; };
+  const close = () => { box.classList.add('hidden'); matches = []; };
+  const pick = (u) => {
+    const pos = ta.selectionStart; const before = ta.value.slice(0, pos).replace(/@([\w.-]*)$/, `@${u.name} `);
+    ta.value = before + ta.value.slice(pos); ta.selectionStart = ta.selectionEnd = before.length; close(); ta.focus();
+  };
+  const draw = () => {
+    box.innerHTML = matches.map((u, i) => `<button type="button" class="${i === idx ? 'on' : ''}" data-u="${u.id}"><span class="avatar">${esc(initials(u.name))}</span>${esc(u.name)}</button>`).join('');
+    $$('[data-u]', box).forEach((b) => b.addEventListener('mousedown', (e) => { e.preventDefault(); pick(matches.find((u) => String(u.id) === b.dataset.u)); }));
+  };
+  ta.addEventListener('input', () => {
+    const w = word();
+    if (w === null) return close();
+    matches = activeUsers().filter((u) => u.id !== S.me.id && u.name.toLowerCase().split(/\s+/).some((part) => part.startsWith(w.toLowerCase()))).slice(0, 6);
+    idx = 0;
+    if (!matches.length) return close();
+    box.classList.remove('hidden'); draw();
+  });
+  // runs before the Enter-to-send handler, so Enter picks a name while the list is open
+  ta.addEventListener('keydown', (e) => {
+    if (box.classList.contains('hidden') || !matches.length) return;
+    if (e.key === 'ArrowDown' || e.key === 'ArrowUp') { e.preventDefault(); idx = (idx + (e.key === 'ArrowDown' ? 1 : -1) + matches.length) % matches.length; draw(); }
+    else if (e.key === 'Enter' || e.key === 'Tab') { e.preventDefault(); e.stopImmediatePropagation(); pick(matches[idx]); }
+    else if (e.key === 'Escape') { e.stopPropagation(); close(); }
+  });
+  ta.addEventListener('blur', () => setTimeout(close, 150));
+}
+
+// ---------- follow-up reminders ----------
+const addDays = (n) => { const d = new Date(); d.setDate(d.getDate() + n); return d.toISOString().slice(0, 10); };
+function reminderModal(p, milestoneId, after) {
+  const m = milestoneId ? msById(milestoneId) : null;
+  const card = openModal(`${modalHead('⏰ Set a follow-up reminder')}
+    <p class="muted small" style="margin-top:-6px">${esc(p.address || p.name)} · ${esc(p.code)}. On the day, it shows on the Dashboard and in Notifications.</p>
+    <form class="form-grid">
+      <label class="full">What to do<input name="text" required value="${esc(m ? `Follow up on ${m.name}` : 'Follow up')}"></label>
+      <label>When<input name="due_on" type="date" required value="${addDays(7)}" min="${today()}"></label>
+      <div class="quick-dates">${[[1, 'Tomorrow'], [3, '3 days'], [7, '1 week'], [14, '2 weeks'], [30, '1 month']].map(([n, t]) => `<button type="button" class="chip" data-days="${n}">${t}</button>`).join('')}</div>
+      <label>For<select name="user_id">${options(activeUsers().map((u) => [u.id, u.id === S.me.id ? `Me (${u.name})` : u.name]), S.me.id)}</select></label>
+      <label>About<select name="milestone_id">${options(S.meta.milestones.map((x) => [x.id, x.name]), m?.id ?? '', { blank: 'The site in general' })}</select></label>
+      <div class="modal-foot full"><button type="button" class="btn" data-close>Cancel</button><button class="btn primary">Set reminder</button></div>
+    </form>`);
+  $$('[data-days]', card).forEach((b) => (b.onclick = () => { $('[name=due_on]', card).value = addDays(Number(b.dataset.days)); }));
+  $('form', card).addEventListener('submit', async (e) => {
+    e.preventDefault();
+    try { await api('POST', `/api/projects/${p.id}/reminders`, formData(e.target)); modalClose = null; closeModal(); toast('Reminder set'); refreshBell(); after?.(); } catch (err) { fail(err); }
+  });
+}
+const reminderLine = (r, { showSite }) => {
+  const late = r.due_on < today(); const isToday = r.due_on === today();
+  return `<div class="rem ${late ? 'late' : isToday ? 'today' : ''}">
+    <div class="rem-main"><b>${esc(r.text)}</b>${r.milestone ? ` <span class="msg-tag"><span class="dot" style="background:${esc(r.color || '#94a3b8')}"></span>${esc(r.milestone)}</span>` : ''}
+      <div class="muted small">${late ? '<span class="stale">Overdue</span> · ' : isToday ? '<b>Today</b> · ' : ''}${fdate(r.due_on)}${showSite ? ` · <a href="#/projects/${r.project_id}">${esc(r.code)} ${esc(r.address || r.project_name)}</a>` : ` · for ${esc(r.user_id === S.me.id ? 'me' : r.user_name)}`}</div></div>
+    <span class="rem-actions"><button type="button" class="btn sm" data-rdone="${r.id}" title="Mark done">✓ Done</button>
+      <button type="button" class="btn sm" data-rsnooze="${r.id}" title="Push back a week">+1 week</button></span></div>`;
+};
+function bindReminderLines(root, after) {
+  $$('[data-rdone]', root).forEach((b) => (b.onclick = async () => { try { await api('PATCH', `/api/reminders/${b.dataset.rdone}`, { done: true }); toast('Reminder done'); after(); } catch (err) { fail(err); } }));
+  $$('[data-rsnooze]', root).forEach((b) => (b.onclick = async () => { try { await api('PATCH', `/api/reminders/${b.dataset.rsnooze}`, { due_on: addDays(7) }); toast('Pushed back a week'); after(); } catch (err) { fail(err); } }));
+}
+async function projectRemindersCard(p, el) {
+  const rows = await api('GET', `/api/projects/${p.id}/reminders`);
+  el.innerHTML = `<div style="display:flex;justify-content:space-between;align-items:center"><h2 style="margin:0">⏰ Reminders</h2><button class="btn sm" id="addReminder">+ Add</button></div>
+    <div class="rem-list">${rows.map((r) => reminderLine(r, { showSite: false })).join('') || '<div class="muted small" style="margin-top:8px">No follow-ups set.</div>'}</div>`;
+  $('#addReminder', el).onclick = () => reminderModal(p, null, () => projectRemindersCard(p, el));
+  bindReminderLines(el, () => projectRemindersCard(p, el));
+}
+
+// ---------- required documents ----------
+// A milestone can need a document (e.g. a signed contract) before it can be marked done.
+function docUploadModal(projectId, milestoneId, missing, retry) {
+  const m = msById(milestoneId);
+  const card = openModal(`${modalHead(`📎 ${esc(m?.name || 'Milestone')} needs a document`)}
+    <p>Before <b>${esc(m?.name || 'this milestone')}</b> can be marked done, upload ${missing.map((c) => `a <b>${esc(label(c))}</b>`).join(' and ')} document.</p>
+    <form class="grid">
+      <label>Document type<select name="category">${options(S.meta.enums.docCategory, missing[0])}</select></label>
+      <label>File(s)<input type="file" name="files" multiple required></label>
+      <div class="modal-foot"><button type="button" class="btn" data-close>Cancel</button><button class="btn primary">Upload and mark done</button></div>
+    </form>`);
+  $('form', card).addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const fd = new FormData();
+    [...$('[name=files]', card).files].forEach((f) => fd.append('files', f));
+    fd.append('category', $('[name=category]', card).value);
+    const btn = $('button.primary', card); btn.disabled = true; btn.textContent = 'Uploading…';
+    try { await api('POST', `/api/projects/${projectId}/documents`, fd); modalClose = null; closeModal(); await retry(); }
+    catch (err) { fail(err); btn.disabled = false; btn.textContent = 'Upload and mark done'; }
+  });
+}
+
+// ---------- rebate board ----------
+const CORE_STATES = ['NY', 'NJ', 'TX', 'CA', 'CT', 'IL'];
+const REBATE_KIND = { rebate: 'Rebate', grant: 'Grant', make_ready: 'Make-ready program', tax_credit: 'Tax credit' };
+const REBATE_STATUS = { open: 'Open', upcoming: 'Opening soon', waitlist: 'Waitlist', closed: 'Closed' };
+const regionName = (code) => (code === 'US' ? 'Federal (all states)' : stateName(code));
+const rebateStatusBadge = (s) => badge(`rb-${s}`, REBATE_STATUS[s] || s);
+const daysUntil = (d) => (d ? Math.ceil((toDate(d) - new Date(today())) / 864e5) : null);
+const deadlineText = (d) => {
+  const n = daysUntil(d);
+  if (n == null) return '';
+  return n < 0 ? `deadline passed ${fdate(d)}` : n === 0 ? 'deadline today' : `deadline ${fdate(d)} (${n} day${n === 1 ? '' : 's'})`;
+};
+const needsCheck = (r) => (r.verified ? '' : badge('rb-check', 'Sample · needs checking'));
+// small clickable chip for a rebate on a site
+const rebateChip = (r) => `<button type="button" class="rebate-chip" data-rebate="${r.id}" title="Show rebate details">💲 ${esc(r.name)}${r.status && r.status !== 'open' ? ` <span class="muted">(${esc(REBATE_STATUS[r.status] || r.status)})</span>` : ''}</button>`;
+const bindRebateChips = (root = view) => $$('[data-rebate]', root).forEach((b) => (b.onclick = (e) => { e.stopPropagation(); rebateInfo(b.dataset.rebate); }));
+
+async function renderRebates() {
+  const q = qs();
+  const f = { state: q.get('state') || '', status: q.get('status') ?? 'available', kind: q.get('kind') || '', q: q.get('q') || '' };
+  const all = await api('GET', `/api/rebates?${new URLSearchParams(Object.entries({ ...f, state: '' }).filter(([, v]) => v))}`);
+  const groups = {};
+  all.forEach((r) => (groups[r.state] ||= []).push(r));
+  const order = (k) => (k === 'US' ? 0 : CORE_STATES.includes(k) ? 1 + CORE_STATES.indexOf(k) : 100);
+  const keys = [...new Set([...CORE_STATES, 'US', ...Object.keys(groups)])].sort((a, b) => order(a) - order(b) || a.localeCompare(b));
+  const shown = f.state ? [f.state, ...(f.state !== 'US' && groups.US ? ['US'] : [])] : keys.filter((k) => groups[k]?.length);
+  const card = (r) => `<button type="button" class="rcard" data-rebate="${r.id}">
+      <div class="rcard-top"><b>${esc(r.name)}</b>${rebateStatusBadge(r.status)}</div>
+      <div class="muted small">${esc(REBATE_KIND[r.kind])}${r.provider ? ` · ${esc(r.provider)}` : ''}${r.utility_name ? ` · ${esc(r.utility_name)} customers` : ''}</div>
+      ${r.amount_text ? `<div class="rcard-amt">${esc(r.amount_text)}</div>` : ''}
+      ${r.offer ? `<div class="small rcard-offer">🔌 ${esc(r.offer.split('\n')[0])}</div>` : ''}
+      <div class="rcard-foot small">
+        ${r.deadline ? `<span class="${daysUntil(r.deadline) != null && daysUntil(r.deadline) <= 30 && r.status !== 'closed' ? 'stale' : 'muted'}">${esc(deadlineText(r.deadline))}</span>` : '<span class="muted">No deadline listed</span>'}
+        <span class="muted">${r.site_count ? `${r.site_count} site${r.site_count === 1 ? '' : 's'}` : ''}</span>
+      </div>
+      ${needsCheck(r)}
+    </button>`;
+  view.innerHTML = `
+    <div class="page-head"><h1>Rebates <span class="muted small">${all.length}</span></h1>
+      <div class="actions"><button class="btn primary" id="newRebate">+ New rebate</button></div></div>
+    <p class="muted small" style="margin-top:-8px">Rebates, grants and tax credits by state. Pick one on a property and the sales team can click it to see what it is, how many chargers we can offer and the requirements.</p>
+    <form class="filters" id="rFilters">
+      <input type="search" name="q" placeholder="Search rebates, providers, utilities…" value="${esc(f.q)}">
+      <select name="status">${options([['available', 'Open, upcoming or waitlist'], ...Object.entries(REBATE_STATUS)], f.status, { blank: 'Any status' })}</select>
+      <select name="kind">${options(Object.entries(REBATE_KIND), f.kind, { blank: 'Any type' })}</select>
+    </form>
+    <div class="chips">
+      <button class="chip ${f.state ? '' : 'active'}" data-st="">All <span>${all.length}</span></button>
+      ${keys.map((k) => `<button class="chip ${f.state === k ? 'active' : ''}" data-st="${esc(k)}" title="${esc(regionName(k))}">${k === 'US' ? 'Federal' : esc(k)} <span>${groups[k]?.length || 0}</span></button>`).join('')}
+    </div>
+    ${shown.map((k) => `<section class="lane"><div class="lane-head static"><span class="lane-title">${esc(regionName(k))}${k !== 'US' ? ` <span class="muted">${esc(k)}</span>` : ''}</span>
+        <span class="sub">${(groups[k] || []).length} program${(groups[k] || []).length === 1 ? '' : 's'}</span></div>
+      <div class="rgrid">${(groups[k] || []).map(card).join('') || `<div class="empty small">Nothing listed for ${esc(regionName(k))} yet. <button type="button" class="link-btn" data-new-in="${esc(k)}">Add one</button></div>`}</div></section>`).join('')
+      || '<div class="card empty">No rebates match.</div>'}`;
+  const form = $('#rFilters');
+  const go = (over = {}) => {
+    const p = new URLSearchParams(); Object.entries(formData(form)).forEach(([k, v]) => p.set(k, v));
+    const st = 'state' in over ? over.state : f.state; if (st) p.set('state', st);
+    location.hash = `#/rebates?${p}`;
+  };
+  $$('select', form).forEach((s) => (s.onchange = () => go()));
+  let t; $('input[name=q]', form).addEventListener('input', () => { clearTimeout(t); t = setTimeout(() => go(), 350); });
+  form.addEventListener('submit', (e) => { e.preventDefault(); go(); });
+  $$('.chip', view).forEach((c) => (c.onclick = () => go({ state: c.dataset.st })));
+  $('#newRebate').onclick = () => rebateForm(null, { state: f.state });
+  $$('[data-new-in]', view).forEach((b) => (b.onclick = () => rebateForm(null, { state: b.dataset.newIn })));
+  $$('[data-rebate]', view).forEach((b) => (b.onclick = () => rebateInfo(b.dataset.rebate)));
+  const qi = $('input[name=q]', form); if (f.q) { qi.focus(); qi.setSelectionRange(f.q.length, f.q.length); }
+}
+
+// What the sales team sees when they click a rebate
+async function rebateInfo(id) {
+  const r = await api('GET', `/api/rebates/${id}`).catch(fail);
+  if (!r) return;
+  const reqs = String(r.requirements || '').split('\n').map((x) => x.replace(/^[-•*]\s*/, '').trim()).filter(Boolean);
+  const card = openModal(`<div class="modal-head"><div>
+      <h2 style="margin:0">${esc(r.name)}</h2>
+      <div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:6px">${rebateStatusBadge(r.status)} ${badge('', REBATE_KIND[r.kind])} ${badge('', regionName(r.state))} ${needsCheck(r)}</div></div>
+      <button class="x" data-close aria-label="Close">×</button></div>
+    ${!r.verified ? '<div class="note-warn small">This is a sample entry. Confirm the amount, deadline and requirements on the official program page before quoting it to a customer.</div>' : ''}
+    <dl class="kv" style="margin:12px 0">
+      ${r.amount_text ? `<dt>Amount</dt><dd><b>${esc(r.amount_text)}</b>${r.max_amount ? ` <span class="muted small">(up to ${money(r.max_amount)} per site)</span>` : ''}</dd>` : ''}
+      ${r.provider ? `<dt>Run by</dt><dd>${esc(r.provider)}</dd>` : ''}
+      ${r.utility_name ? `<dt>Utility</dt><dd><a href="#/utilities/${r.utility_id}">${esc(r.utility_name)}</a> customers only</dd>` : ''}
+      ${r.charger_types ? `<dt>Chargers</dt><dd>${esc(r.charger_types.replace(',', ' and '))}</dd>` : ''}
+      ${r.site_types ? `<dt>Site types</dt><dd>${esc(r.site_types)}</dd>` : ''}
+      ${r.opens_on ? `<dt>Opens</dt><dd>${fdate(r.opens_on)}</dd>` : ''}
+      <dt>Deadline</dt><dd>${r.deadline ? `<span class="${daysUntil(r.deadline) <= 30 ? 'stale' : ''}">${esc(deadlineText(r.deadline))}</span>` : '—'}</dd>
+      ${r.url ? `<dt>Program page</dt><dd><a href="${esc(r.url)}" target="_blank" rel="noopener">${esc(r.url.replace(/^https?:\/\//, '').slice(0, 60))} ↗</a></dd>` : ''}
+    </dl>
+    ${r.summary ? `<h3>What it is</h3><p style="white-space:pre-wrap;margin-top:0">${esc(r.summary)}</p>` : ''}
+    ${r.offer ? `<div class="offer-box"><h3 style="margin-bottom:4px">🔌 Chargers we can offer <span class="muted small" style="font-weight:500">— internal, for sales</span></h3><div style="white-space:pre-wrap">${esc(r.offer)}</div></div>` : ''}
+    ${reqs.length ? `<h3 style="margin-top:14px">Requirements</h3><ul class="req-list">${reqs.map((x) => `<li>${esc(x)}</li>`).join('')}</ul>` : ''}
+    ${r.notes ? `<h3 style="margin-top:14px">Notes</h3><div class="small" style="white-space:pre-wrap">${esc(r.notes)}</div>` : ''}
+    <h3 style="margin-top:14px">Sites going after it <span class="muted small">${r.sites.length}</span></h3>
+    ${r.sites.length ? `<div class="small">${r.sites.map((s) => `<a href="#/projects/${s.id}">${esc(s.code)} ${esc(s.name)}</a>`).join(' · ')}</div>` : '<div class="muted small">None yet.</div>'}
+    <div class="modal-foot" style="justify-content:space-between"><span class="muted small">Last updated ${fdate(r.updated_at)}${r.updated_by_name ? ` by ${esc(r.updated_by_name)}` : ''}</span>
+      <span style="display:flex;gap:8px"><button class="btn" id="editRebate">Edit</button><button class="btn primary" data-close>Close</button></span></div>`, { wide: true });
+  $('#editRebate', card).onclick = () => { modalClose = null; closeModal(); rebateForm(r); };
+}
+
+function rebateForm(r = null, { state = '' } = {}) {
+  const v = r || { state, kind: 'rebate', status: 'open', verified: 0 };
+  const stateOpts = [['US', 'Federal (all states)'], ...US_STATES.map(([c, n]) => [c, `${c} · ${n}`])];
+  const types = String(v.charger_types || '').split(',');
+  const card = openModal(`${modalHead(r ? `Edit ${esc(r.name)}` : 'New rebate')}
+    <form class="form-grid">
+      <label class="full">Program name *<input name="name" required value="${esc(v.name)}" placeholder="e.g. Charge Ready NY 2.0"></label>
+      <label>State *<select name="state" required>${options(stateOpts, v.state, { blank: 'Choose…' })}</select></label>
+      <label>Type<select name="kind">${options(Object.entries(REBATE_KIND), v.kind)}</select></label>
+      <label>Status<select name="status">${options(Object.entries(REBATE_STATUS), v.status)}</select></label>
+      <label>Run by<input name="provider" value="${esc(v.provider)}" placeholder="e.g. NYSERDA, Con Edison"></label>
+      <label>Only for customers of<select name="utility_id">${options(S.meta.utilities.map((u) => [u.id, `${u.name}${u.states ? ` (${u.states})` : ''}`]), v.utility_id, { blank: 'Any utility' })}</select></label>
+      <label class="full">Amount<input name="amount_text" value="${esc(v.amount_text)}" placeholder="e.g. $4,000 per Level 2 port, up to $40,000 per site"></label>
+      <label>Most one site can get (USD)<input name="max_amount" type="number" min="0" step="any" value="${esc(v.max_amount)}"></label>
+      <fieldset class="checkset"><legend>Charger types</legend>
+        <label><input type="checkbox" name="ct_L2" ${types.includes('L2') ? 'checked' : ''}> Level 2</label>
+        <label><input type="checkbox" name="ct_DCFC" ${types.includes('DCFC') ? 'checked' : ''}> DC fast</label></fieldset>
+      <label>Site types<input name="site_types" value="${esc(v.site_types)}" placeholder="e.g. multifamily, workplace, public"></label>
+      <label>Opens<input name="opens_on" type="date" value="${esc(v.opens_on)}"></label>
+      <label>Deadline<input name="deadline" type="date" value="${esc(v.deadline)}"></label>
+      <label class="full">Official program page<input name="url" value="${esc(v.url)}" placeholder="https://…"></label>
+      <label class="full">What it is<textarea name="summary" placeholder="A short plain-English summary of the program">${esc(v.summary)}</textarea></label>
+      <label class="full">Chargers we can offer <span class="muted" style="font-weight:500">(internal, for sales)</span><textarea name="offer" placeholder="e.g. Up to 10 Level 2 ports per site. DC fast not covered.">${esc(v.offer)}</textarea></label>
+      <label class="full">Requirements <span class="muted" style="font-weight:500">(one per line)</span><textarea name="requirements" placeholder="Publicly accessible 24/7&#10;5-year operating commitment&#10;Must be a Con Edison customer">${esc(v.requirements)}</textarea></label>
+      <label class="full">Notes<textarea name="notes">${esc(v.notes)}</textarea></label>
+      <label class="full check-inline"><input type="checkbox" name="verified" ${v.verified ? 'checked' : ''}> Details checked against the official program page</label>
+      <div class="modal-foot full" style="justify-content:space-between">
+        <span>${r ? '<button type="button" class="btn danger" id="delRebate">Delete</button>' : ''}</span>
+        <span style="display:flex;gap:8px"><button type="button" class="btn" data-close>Cancel</button><button class="btn primary">${r ? 'Save' : 'Add rebate'}</button></span></div>
+    </form>`, { wide: true });
+  $('form', card).addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const d = formData(e.target);
+    d.charger_types = ['L2', 'DCFC'].filter((x) => d[`ct_${x}`]).join(',') || null;
+    delete d.ct_L2; delete d.ct_DCFC;
+    d.verified = !!d.verified;
+    try {
+      const saved = r ? await api('PATCH', `/api/rebates/${r.id}`, d) : await api('POST', '/api/rebates', d);
+      await loadMeta(); modalClose = null; closeModal(); toast(r ? 'Rebate saved' : 'Rebate added');
+      if (location.hash.startsWith('#/rebates')) renderRebates(); else rebateInfo(saved.id);
+    } catch (err) { fail(err); }
+  });
+  $('#delRebate', card)?.addEventListener('click', async () => {
+    if (!confirm(`Delete "${r.name}"?${r.site_count ? ` It's selected on ${r.site_count} site(s); it will be removed from them.` : ''}`)) return;
+    try { await api('DELETE', `/api/rebates/${r.id}`); await loadMeta(); modalClose = null; closeModal(); toast('Rebate deleted'); route(); } catch (err) { fail(err); }
+  });
+}
+
+// ---------- utility directory ----------
+async function renderUtilities() {
+  const q = qs();
+  const f = { q: (q.get('q') || '').toLowerCase(), state: q.get('state') || '' };
+  const allRows = await api('GET', '/api/utilities');
+  let rows = allRows;
+  if (f.state) rows = rows.filter((u) => String(u.states || '').split(',').includes(f.state));
+  if (f.q) rows = rows.filter((u) => [u.name, u.contact_name, u.make_ready_program, u.notes].join(' ').toLowerCase().includes(f.q));
+  const states = [...new Set([...CORE_STATES, ...allRows.flatMap((u) => String(u.states || '').split(',').filter(Boolean))])];
+  view.innerHTML = `
+    <div class="page-head"><h1>Utilities <span class="muted small">${rows.length}</span></h1>
+      <div class="actions"><button class="btn primary" id="newUtility">+ Add utility</button></div></div>
+    <p class="muted small" style="margin-top:-8px">Your contacts at each utility, its make-ready program and how long approvals usually take. Every site links to its utility.</p>
+    <form class="filters" id="uFilters">
+      <input type="search" name="q" placeholder="Search utilities, contacts, programs…" value="${esc(q.get('q') || '')}">
+      <select name="state">${options(states.map((s) => [s, `${s} · ${stateName(s)}`]), f.state, { blank: 'All states' })}</select>
+    </form>
+    <div class="table-wrap"><table><thead><tr><th>Utility</th><th>States</th><th>Our contact</th><th>Make-ready program</th><th>Typical approval</th><th>Sites</th><th>Rebates</th></tr></thead>
+    <tbody>${rows.map((u) => `<tr class="clickable" data-href="#/utilities/${u.id}">
+      <td><b>${esc(u.name)}</b>${u.phone ? `<div class="muted small">${esc(u.phone)}</div>` : ''}</td>
+      <td>${esc(u.states || '—')}</td>
+      <td>${u.contact_name ? `${esc(u.contact_name)}<div class="muted small">${esc([u.contact_email, u.contact_phone].filter(Boolean).join(' · '))}</div>` : '<span class="muted">—</span>'}</td>
+      <td class="small">${esc(u.make_ready_program || '—')}</td>
+      <td>${u.approval_days ? `${u.approval_days} days` : '<span class="muted">—</span>'}</td>
+      <td>${u.site_count || '—'}</td><td>${u.rebate_count || '—'}</td></tr>`).join('') || '<tr><td colspan="7" class="empty">No utilities yet.</td></tr>'}</tbody></table></div>`;
+  const form = $('#uFilters');
+  const go = () => { const p = new URLSearchParams(); Object.entries(formData(form)).forEach(([k, v]) => v && p.set(k, v)); location.hash = `#/utilities?${p}`; };
+  $('select', form).onchange = go;
+  let t; $('input', form).addEventListener('input', () => { clearTimeout(t); t = setTimeout(go, 350); });
+  form.addEventListener('submit', (e) => { e.preventDefault(); go(); });
+  $('#newUtility').onclick = () => utilityForm();
+  bindRowLinks();
+  const qi = $('input', form); if (f.q) { qi.focus(); qi.setSelectionRange(qi.value.length, qi.value.length); }
+}
+
+async function renderUtility(id) {
+  const u = await api('GET', `/api/utilities/${id}`);
+  $$('[data-nav]').forEach((a) => a.classList.toggle('active', a.dataset.nav === 'utilities'));
+  const live = u.sites.filter((p) => p.ms_complete);
+  const link = (v, href) => (v ? `<a href="${href}">${esc(v)}</a>` : '—');
+  view.innerHTML = `
+    <div class="page-head"><div><div class="muted small"><a href="#/utilities">Utilities</a> / ${esc(u.name)}</div><h1>${esc(u.name)}</h1>
+      <div class="muted small" style="margin-top:4px">${esc(u.states || 'No states set')} · updated ${fdate(u.updated_at)}${u.updated_by_name ? ` by ${esc(u.updated_by_name)}` : ''}</div></div>
+      <div class="actions"><button class="btn" id="editUtility">Edit</button></div></div>
+    <div class="cols-main">
+      <div class="grid" style="gap:16px">
+        <div class="card"><h2>Sites with ${esc(u.name)} <span class="muted small">${u.sites.length} · ${live.length} live</span></h2>
+          ${u.sites.length ? `<div class="table-wrap" style="box-shadow:none"><table><thead><tr><th>Site</th><th>Milestones</th><th>Progress</th></tr></thead><tbody>
+          ${u.sites.map((p) => `<tr class="clickable" data-href="#/projects/${p.id}"><td><b>${esc(p.address || p.name)}</b><div class="muted small">${esc(p.code)} · ${esc(p.name)}</div></td>
+            <td>${p.phase === 'diligence' ? '' : msStrip(p, { names: false })}</td><td>${progressBadge(p)}</td></tr>`).join('')}</tbody></table></div>` : '<div class="empty">No sites use this utility yet.</div>'}</div>
+        <div class="card"><h2>Rebates for ${esc(u.name)} customers</h2>
+          ${u.rebates.length ? u.rebates.map((r) => `<div style="margin-bottom:6px">${rebateChip(r)} <span class="muted small">${esc(r.amount_text || '')}</span></div>`).join('') : '<div class="muted small">None on the Rebates board.</div>'}</div>
+      </div>
+      <div class="card"><h2>Details</h2><dl class="kv">
+        <dt>Main phone</dt><dd>${u.phone ? `<a href="tel:${esc(u.phone)}">${esc(u.phone)}</a>` : '—'}</dd>
+        <dt>Website</dt><dd>${u.website ? `<a href="${esc(/^https?:/i.test(u.website) ? u.website : `https://${u.website}`)}" target="_blank" rel="noopener">${esc(u.website)} ↗</a>` : '—'}</dd>
+        <dt>Our contact</dt><dd>${esc(u.contact_name || '—')}</dd>
+        <dt>Contact email</dt><dd>${u.contact_email ? link(u.contact_email, `mailto:${u.contact_email}`) : '—'}</dd>
+        <dt>Contact phone</dt><dd>${u.contact_phone ? link(u.contact_phone, `tel:${u.contact_phone}`) : '—'}</dd>
+        <dt>Make-ready</dt><dd style="white-space:pre-wrap">${esc(u.make_ready_program || '—')}</dd>
+        <dt>Typical approval</dt><dd>${u.approval_days ? `${u.approval_days} days` : '—'}</dd>
+      </dl>${u.notes ? `<h3 style="margin-top:14px">Notes</h3><div style="white-space:pre-wrap">${esc(u.notes)}</div>` : ''}</div>
+    </div>`;
+  $('#editUtility').onclick = () => utilityForm(u);
+  bindRebateChips();
+  bindRowLinks();
+}
+
+function utilityForm(u = null) {
+  const v = u || {};
+  const card = openModal(`${modalHead(u ? `Edit ${esc(u.name)}` : 'Add utility')}
+    <form class="form-grid">
+      <label class="full">Utility name *<input name="name" required value="${esc(v.name)}" placeholder="e.g. Con Edison"></label>
+      <label>States served<input name="states" value="${esc(v.states)}" placeholder="e.g. NY or NY, NJ"></label>
+      <label>Main phone<input name="phone" value="${esc(v.phone)}"></label>
+      <label class="full">Website<input name="website" value="${esc(v.website)}" placeholder="https://…"></label>
+      <h3 class="full" style="margin:6px 0 0">Our contact there</h3>
+      <label>Name<input name="contact_name" value="${esc(v.contact_name)}"></label>
+      <label>Email<input name="contact_email" type="email" value="${esc(v.contact_email)}"></label>
+      <label>Phone<input name="contact_phone" value="${esc(v.contact_phone)}"></label>
+      <h3 class="full" style="margin:6px 0 0">How they work</h3>
+      <label class="full">Make-ready program<textarea name="make_ready_program" placeholder="What the utility pays for and how to apply">${esc(v.make_ready_program)}</textarea></label>
+      <label>Typical approval (days)<input name="approval_days" type="number" min="0" value="${esc(v.approval_days)}"></label>
+      <label class="full">Notes<textarea name="notes" placeholder="Tips, who to escalate to, quirks…">${esc(v.notes)}</textarea></label>
+      <div class="modal-foot full" style="justify-content:space-between">
+        <span>${u ? '<button type="button" class="btn danger" id="delUtility">Delete</button>' : ''}</span>
+        <span style="display:flex;gap:8px"><button type="button" class="btn" data-close>Cancel</button><button class="btn primary">${u ? 'Save' : 'Add utility'}</button></span></div>
+    </form>`, { wide: true });
+  $('form', card).addEventListener('submit', async (e) => {
+    e.preventDefault();
+    try {
+      const saved = u ? await api('PATCH', `/api/utilities/${u.id}`, formData(e.target)) : await api('POST', '/api/utilities', formData(e.target));
+      await loadMeta(); modalClose = null; closeModal(); toast('Utility saved');
+      if (u) route(); else location.hash = `#/utilities/${saved.id}`;
+    } catch (err) { fail(err); }
+  });
+  $('#delUtility', card)?.addEventListener('click', async () => {
+    if (!confirm(`Delete ${u.name} from the directory?`)) return;
+    try { await api('DELETE', `/api/utilities/${u.id}`); await loadMeta(); modalClose = null; closeModal(); toast('Utility deleted'); location.hash = '#/utilities'; } catch (err) { fail(err); }
+  });
+}
+
+// ---------- map ----------
+// Leaflet + OpenStreetMap. Pins are looked up from each site's address; any pin can be dragged or placed by hand.
+let leafletReady = null;
+function loadLeaflet() {
+  if (window.L) return Promise.resolve();
+  if (leafletReady) return leafletReady;
+  leafletReady = new Promise((resolve, reject) => {
+    const css = document.createElement('link');
+    css.rel = 'stylesheet'; css.href = 'https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css';
+    document.head.appendChild(css);
+    const js = document.createElement('script');
+    js.src = 'https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js';
+    js.onload = () => resolve(); js.onerror = () => { leafletReady = null; reject(new Error('The map needs an internet connection to load.')); };
+    document.head.appendChild(js);
+  });
+  return leafletReady;
+}
+const pinColor = (p) => (p.phase === 'diligence' ? '#8b5cf6' : p.ms_complete ? '#10b981' : isFlagged(p) ? '#dc2626' : ['on_hold', 'blocked'].includes(p.status) ? '#94a3b8' : '#f59e0b');
+let placing = null; // site waiting for a click on the map
+
+async function renderMap() {
+  const q = qs();
+  const f = { phase: q.get('phase') || '', state: q.get('state') || '' };
+  const mine = q.get('mine') === '1' && myStates().length;
+  const params = new URLSearchParams({ status: q.get('status') ?? 'open' });
+  if (f.phase) params.set('phase', f.phase);
+  if (f.state) params.set('state', f.state);
+  if (mine) params.set('states', myStates().join(','));
+  const rows = (await api('GET', `/api/projects?${params}`)).filter((p) => !['lost', 'cancelled'].includes(p.status));
+  const onMap = rows.filter((p) => p.lat != null && p.lng != null);
+  const off = territoryFirst(rows.filter((p) => p.lat == null || p.lng == null));
+  const states = [...new Set([...CORE_STATES, ...S.meta.statesInUse])];
+  view.innerHTML = `
+    <div class="page-head"><h1>Map <span class="muted small">${onMap.length} of ${rows.length} on the map</span></h1>
+      <div class="actions">${territoryToggle(mine)}</div></div>
+    <form class="filters" id="mFilters">
+      <select name="phase">${options([['diligence', 'Due diligence'], ['pipeline', 'Pipeline']], f.phase, { blank: 'Diligence + pipeline' })}</select>
+      <select name="state">${options(states.map((s) => [s, `${s} · ${stateName(s)}`]), f.state, { blank: 'All states' })}</select>
+      <select name="status">${options([['open', 'Open'], ['', 'Include won / live']], params.get('status'))}</select>
+    </form>
+    <div class="legend small muted" style="margin:-4px 0 10px">${[['#8b5cf6', 'Due diligence'], ['#f59e0b', 'In progress'], ['#dc2626', 'Running late'], ['#94a3b8', 'On hold / blocked'], ['#10b981', 'Live']].map(([c, t]) => `<span><i style="background:${c}"></i>${t}</span>`).join('')}</div>
+    <div id="placeBanner" class="note-warn hidden"></div>
+    <div class="map-wrap"><div id="map" class="map"><div class="empty">Loading map…</div></div>
+      <aside class="map-side card"><h2>Not on the map yet <span class="muted small">${off.length}</span></h2>
+        <p class="muted small" style="margin-top:-6px">These need a full address, or place the pin yourself.</p>
+        ${off.map((p) => `<div class="off-row"><div><b>${esc(p.address || p.name)}</b><div class="muted small">${esc([p.city, p.state].filter(Boolean).join(', ') || 'No address')} · ${esc(p.code)}</div></div>
+          <span style="display:flex;gap:4px;flex-wrap:wrap"><button class="btn sm" data-locate="${p.id}" ${p.address || p.city ? '' : 'disabled'}>Find address</button><button class="btn sm" data-place="${p.id}">Place pin</button></span></div>`).join('') || '<div class="muted small">Every site has a pin. 👍</div>'}
+      </aside></div>`;
+  const form = $('#mFilters');
+  const go = (over = {}) => {
+    const p = new URLSearchParams(); Object.entries(formData(form)).forEach(([k, v]) => { if (v || k === 'status') p.set(k, v); });
+    if ('mine' in over ? over.mine : mine) p.set('mine', '1');
+    location.hash = `#/map?${p}`;
+  };
+  $$('select', form).forEach((s) => (s.onchange = () => go()));
+  $('#mineToggle')?.addEventListener('click', () => go({ mine: !mine }));
+  $$('[data-locate]', view).forEach((b) => (b.onclick = async () => {
+    b.disabled = true; b.textContent = 'Looking…';
+    try { await api('POST', `/api/projects/${b.dataset.locate}/geocode`); toast('Found it'); renderMap(); } catch (err) { fail(err); b.disabled = false; b.textContent = 'Find address'; }
+  }));
+  const banner = $('#placeBanner');
+  $$('[data-place]', view).forEach((b) => (b.onclick = () => {
+    placing = rows.find((p) => String(p.id) === b.dataset.place);
+    banner.innerHTML = `Click on the map where <b>${esc(placing.address || placing.name)}</b> is. <button type="button" class="link-btn" id="cancelPlace">Cancel</button>`;
+    banner.classList.remove('hidden');
+    $('#cancelPlace').onclick = () => { placing = null; banner.classList.add('hidden'); };
+  }));
+
+  try { await loadLeaflet(); } catch (err) { $('#map').innerHTML = `<div class="empty">${esc(err.message)}</div>`; return; }
+  if (!$('#map')) return; // navigated away while loading
+  $('#map').innerHTML = '';
+  const map = L.map('map', { scrollWheelZoom: true }).setView([39.5, -96], 4);
+  L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom: 19, attribution: '&copy; OpenStreetMap contributors' }).addTo(map);
+  const save = async (p, ll, revert) => {
+    try { await api('PATCH', `/api/projects/${p.id}`, { lat: +ll.lat.toFixed(6), lng: +ll.lng.toFixed(6) }); toast('Pin saved'); return true; } catch (err) { fail(err); revert?.(); return false; }
+  };
+  onMap.forEach((p) => {
+    const icon = L.divIcon({ className: '', html: `<span class="pin" style="background:${pinColor(p)}"></span>`, iconSize: [18, 18], iconAnchor: [9, 9] });
+    const mk = L.marker([p.lat, p.lng], { icon, draggable: true, title: p.address || p.name }).addTo(map);
+    mk.bindPopup(`<div class="map-pop"><b>${esc(p.address || p.name)}</b><div class="muted small">${esc(p.code)} · ${esc(p.name)}</div>
+      <div style="margin:6px 0">${progressBadge(p)} ${p.status !== 'active' ? statusBadge(p.status) : ''}</div>
+      ${p.phase === 'pipeline' ? msStrip(p, { names: false }) : ''}
+      <div style="margin-top:8px"><a href="#/projects/${p.id}">Open project →</a></div>
+      <div class="muted small" style="margin-top:4px">Wrong spot? Drag the pin.</div></div>`);
+    const start = mk.getLatLng();
+    mk.on('dragend', async () => {
+      if (!confirm(`Move the pin for ${p.address || p.name} here?`)) { mk.setLatLng(start); return; }
+      await save(p, mk.getLatLng(), () => mk.setLatLng(start));
+    });
+  });
+  map.on('click', async (e) => {
+    if (!placing) return;
+    const p = placing; placing = null; banner.classList.add('hidden');
+    if (await save(p, e.latlng)) renderMap();
+  });
+  if (onMap.length) map.fitBounds(L.latLngBounds(onMap.map((p) => [p.lat, p.lng])).pad(0.2), { maxZoom: 12 });
+}
 
 // ---------- dashboard ----------
 async function renderDashboard() {
@@ -246,6 +765,7 @@ async function renderDashboard() {
         </div>
       </div>
       <div class="grid" style="gap:16px">
+        <div class="card" id="myReminders"></div>
         <div class="card"><h2>My open tickets</h2>
           ${d.myTickets.length ? `<div class="feed">${d.myTickets.map((x) => `<div class="feed-item"><a href="#/tickets/${x.id}"><b>#${x.id} ${esc(x.title)}</b></a>
             <div class="muted small">${esc(x.code)} · ${esc(x.project_name)}</div>
@@ -258,10 +778,19 @@ async function renderDashboard() {
   $('#newProject').onclick = () => projectForm();
   $$('.ms-funnel', view).forEach((r) => (r.onclick = () => (location.hash = `#/pipeline?milestone_id=${r.dataset.mid}&ms_status=todo`)));
   bindRowLinks();
+  const drawRem = async () => {
+    const el = $('#myReminders'); if (!el) return;
+    const rows = await api('GET', '/api/reminders');
+    const due = rows.filter((r) => r.due_on <= today());
+    el.innerHTML = `<h2>⏰ My reminders ${due.length ? `<span class="small stale">${due.length} due</span>` : ''}</h2>
+      <div class="rem-list">${rows.slice(0, 12).map((r) => reminderLine(r, { showSite: true })).join('') || '<div class="empty">No follow-ups. Set one with ⏰ on any milestone.</div>'}</div>`;
+    bindReminderLines(el, drawRem);
+  };
+  drawRem().catch(() => {});
 }
 
 function activityItem(a) {
-  const icons = { message: '💬', milestone_updated: '🏁', moved_to_pipeline: '✅', project_created: '🆕', stage_changed: '➡️', status_changed: '🚦', project_updated: '✏️', ticket_created: '🎫', ticket_updated: '🎫', ticket_deleted: '🗑️', documents_uploaded: '📎', document_deleted: '🗑️', note: '📝' };
+  const icons = { reminder_set: '⏰', message: '💬', milestone_updated: '🏁', moved_to_pipeline: '✅', project_created: '🆕', stage_changed: '➡️', status_changed: '🚦', project_updated: '✏️', ticket_created: '🎫', ticket_updated: '🎫', ticket_deleted: '🗑️', documents_uploaded: '📎', document_deleted: '🗑️', note: '📝' };
   const proj = a.project_name ? ` <a href="#/projects/${a.project_id}">${esc(a.code)}</a>` : '';
   const body = a.action === 'note' ? `<div class="note">${esc(a.detail)}</div>` : `<span>${esc(a.detail || '')}</span>`;
   return `<div class="feed-item">${icons[a.action] || '•'} <b>${esc(a.user_name || 'System')}</b> <span class="muted">${esc(label(a.action))}</span>${proj}
@@ -276,12 +805,14 @@ function bindRowLinks(root = view) {
 async function renderDiligence() {
   const q = qs();
   const f = { q: q.get('q') || '', state: q.get('state') || '', status: q.get('status') ?? 'open' };
+  const mine = q.get('mine') === '1' && myStates().length;
   const params = new URLSearchParams({ phase: 'diligence', ...Object.fromEntries(Object.entries(f).filter(([, v]) => v)) });
-  const rows = await api('GET', `/api/projects?${params}`);
+  if (mine) params.set('states', myStates().join(','));
+  const rows = territoryFirst(await api('GET', `/api/projects?${params}`));
   const ready = rows.filter((p) => !ddMissing(p).length).length;
   view.innerHTML = `
     <div class="page-head"><h1>Due Diligence <span class="muted small">${rows.length}</span></h1>
-      <div class="actions"><button class="btn primary" id="newProperty">+ New property</button></div></div>
+      <div class="actions">${territoryToggle(mine)}<button class="btn primary" id="newProperty">+ New property</button></div></div>
     <p class="muted small" style="margin-top:-8px">New properties start here. Fill in the property owner, the rebate the site qualifies for and the utility company, then move it to the pipeline.
       ${rows.length ? `<b>${ready} of ${rows.length}</b> ready to move.` : ''}</p>
     <form class="filters" id="ddFilters">
@@ -294,25 +825,31 @@ async function renderDiligence() {
       const missing = ddMissing(p);
       return `<tr class="clickable" data-href="#/projects/${p.id}">
       <td><b>${esc(p.name)}</b><div class="muted small">${esc(p.code)}${p.address || p.city ? ` · ${esc([p.address, p.city].filter(Boolean).join(', '))}` : ''}</div></td>
-      <td>${p.state ? `<b>${esc(p.state)}</b>` : '<span class="muted">—</span>'}</td>
+      <td>${p.state ? `<b>${esc(p.state)}</b>${inMyTerritory(p) ? ' <span title="Your territory">★</span>' : ''}` : '<span class="muted">—</span>'}</td>
       <td>${esc(p.property_owner || '—')}${p.property_owner_contact ? `<div class="muted small">${esc(p.property_owner_contact)}</div>` : ''}</td>
-      <td>${esc(p.rebate_program || '—')}${p.rebate_amount ? `<div class="muted small">${money(p.rebate_amount)}</div>` : ''}</td>
-      <td>${esc(p.utility_company || '—')}</td>
-      <td><div class="checks">${DD_CHECKS.map(([k, t]) => `<span class="chk ${String(p[k] ?? '').trim() ? 'ok' : ''}" title="${esc(t)}">${String(p[k] ?? '').trim() ? '✓' : '○'} ${esc(t)}</span>`).join('')}</div></td>
+      <td>${p.rebates.map(rebateChip).join(' ') || esc(p.rebate_program || '—')}${p.rebate_amount ? `<div class="muted small">${money(p.rebate_amount)}</div>` : ''}</td>
+      <td>${p.utility_id ? `<a href="#/utilities/${p.utility_id}">${esc(p.utility_company)}</a>` : esc(p.utility_company || '—')}</td>
+      <td><div class="checks">${DD_CHECKS.map(([k, t]) => `<span class="chk ${ddHas(p, k) ? 'ok' : ''}" title="${esc(t)}">${ddHas(p, k) ? '✓' : '○'} ${esc(t)}</span>`).join('')}</div></td>
       <td class="muted">${p.days_in_phase}d</td>
       <td style="text-align:right">${missing.length
         ? `<button class="btn sm" data-edit="${p.id}">Fill in details</button>`
         : `<button class="btn sm primary" data-promote="${p.id}">Move to pipeline →</button>`}</td></tr>`;
     }).join('') || '<tr><td colspan="8" class="empty">No properties in due diligence. Click <b>+ New property</b> to add one.</td></tr>'}</tbody></table></div>`;
   const form = $('#ddFilters');
-  const apply = () => { const p = new URLSearchParams(); Object.entries(formData(form)).forEach(([k, v]) => p.set(k, v)); location.hash = `#/diligence?${p}`; };
-  $$('select', form).forEach((s) => (s.onchange = apply));
-  let t; $('input[name=q]', form).addEventListener('input', () => { clearTimeout(t); t = setTimeout(apply, 350); });
+  const apply = (over = {}) => {
+    const p = new URLSearchParams(); Object.entries(formData(form)).forEach(([k, v]) => p.set(k, v));
+    if ('mine' in over ? over.mine : mine) p.set('mine', '1');
+    location.hash = `#/diligence?${p}`;
+  };
+  $$('select', form).forEach((s) => (s.onchange = () => apply()));
+  let t; $('input[name=q]', form).addEventListener('input', () => { clearTimeout(t); t = setTimeout(() => apply(), 350); });
   form.addEventListener('submit', (e) => { e.preventDefault(); apply(); });
+  $('#mineToggle')?.addEventListener('click', () => apply({ mine: !mine }));
   $('#newProperty').onclick = () => projectForm(null, { phase: 'diligence' });
   const byId = (id) => rows.find((x) => String(x.id) === id);
   $$('[data-promote]', view).forEach((b) => (b.onclick = () => promoteModal(byId(b.dataset.promote), renderDiligence)));
   $$('[data-edit]', view).forEach((b) => (b.onclick = () => projectForm(byId(b.dataset.edit))));
+  bindRebateChips();
   bindRowLinks();
   const qi = $('input[name=q]', form); if (f.q) { qi.focus(); qi.setSelectionRange(f.q.length, f.q.length); }
 }
@@ -330,7 +867,7 @@ function promoteModal(p, after) {
   const card = openModal(`${modalHead('Move to pipeline')}
     <p><b>${esc(p.name)}</b> <span class="muted">(${esc(p.code)}${p.state ? ` · ${esc(stateName(p.state))}` : ''})</span></p>
     <dl class="kv" style="margin-bottom:14px"><dt>Property owner</dt><dd>${esc(p.property_owner)}</dd>
-      <dt>Rebate</dt><dd>${esc(p.rebate_program)}${p.rebate_amount ? ` · ${money(p.rebate_amount)}` : ''}</dd>
+      <dt>Rebate</dt><dd>${p.rebates.map((r) => esc(r.name)).join(', ') || esc(p.rebate_program)}${p.rebate_amount ? ` · ${money(p.rebate_amount)}` : ''}</dd>
       <dt>Utility</dt><dd>${esc(p.utility_company)}</dd></dl>
     ${p.state ? '' : '<p class="small" style="color:var(--warn)">No state is set, so it will show under "No state" in the pipeline. Edit the property to add one.</p>'}
     <form class="grid">
@@ -362,13 +899,16 @@ async function renderPipeline() {
   const params = new URLSearchParams({ phase: 'pipeline', status: q.get('status') || 'open' });
   ['owner_id', 'milestone_id', 'ms_status', 'progress'].forEach((k) => q.get(k) && params.set(k, q.get(k)));
   const stateSel = q.get('state') || '';
+  const mine = q.get('mine') === '1' && myStates().length;
+  if (mine) params.set('states', myStates().join(','));
   const all = await api('GET', `/api/projects?${params}`);
   const keyOf = (p) => (p.state || '').toUpperCase() || 'none';
   const groups = {};
   all.forEach((p) => (groups[keyOf(p)] ||= []).push(p));
   // within a state: unfinished first, most milestones done first, live projects last
   Object.values(groups).forEach((l) => l.sort((a, b) => a.ms_complete - b.ms_complete || (b.ms_done / (b.ms_total || 1)) - (a.ms_done / (a.ms_total || 1))));
-  const keys = Object.keys(groups).sort((a, b) => (a === 'none') - (b === 'none') || stateName(a).localeCompare(stateName(b)));
+  const myFirst = (k) => (myStates().includes(k) ? 0 : 1);
+  const keys = Object.keys(groups).sort((a, b) => (a === 'none') - (b === 'none') || myFirst(a) - myFirst(b) || stateName(a).localeCompare(stateName(b)));
   const shown = stateSel ? keys.filter((k) => k === stateSel) : keys;
   const collapsed = getCollapsed();
   const sum = (list, f) => list.reduce((a, p) => a + (p[f] || 0), 0);
@@ -394,6 +934,7 @@ async function renderPipeline() {
           ${p.owner_name ? `<span>👤 ${esc(p.owner_name)}</span>` : ''}
           ${p.open_tickets ? `<span>🎫 ${p.open_tickets} open</span>` : ''}
           ${p.hold_reason && p.status !== 'active' ? `<span style="color:var(--warn)">${esc(p.hold_reason)}</span>` : ''}
+          ${p.rebates.map(rebateChip).join('')}
           <button type="button" class="btn sm" data-sitechat="${p.id}">💬 Site chat${p.msg_count ? ` (${p.msg_count})` : ''}</button>
           <a class="btn sm" href="#/projects/${p.id}">Open project →</a>
         </div>
@@ -407,7 +948,7 @@ async function renderPipeline() {
     return `<section class="lane ${isOpen ? '' : 'collapsed'}">
       <button class="lane-head" type="button" data-toggle="${esc(k)}">
         <span class="caret">${isOpen ? '▾' : '▸'}</span>
-        <span class="lane-title">${k === 'none' ? 'No state set' : `${esc(stateName(k))} <span class="muted">${esc(k)}</span>`}</span>
+        <span class="lane-title">${k === 'none' ? 'No state set' : `${esc(stateName(k))} <span class="muted">${esc(k)}</span>`}${myStates().includes(k) ? ' <span class="badge ms-live">★ Your territory</span>' : ''}</span>
         <span class="sub">${list.length} project${list.length === 1 ? '' : 's'} · ${num(sum(list, 'charger_count'))} ports · ${money(sum(list, 'estimated_value'))}</span>
       </button>
       ${isOpen ? `<div class="prows">${list.map(row).join('')}</div>` : ''}
@@ -417,7 +958,7 @@ async function renderPipeline() {
   const msOpts = S.meta.milestones.map((m) => [m.id, m.name]);
   view.innerHTML = `
     <div class="page-head"><h1>Pipeline <span class="muted small">${all.length}</span></h1>
-      <div class="actions"><a class="btn" href="#/diligence">Due diligence →</a></div></div>
+      <div class="actions">${territoryToggle(mine)}<a class="btn" href="#/diligence">Due diligence →</a></div></div>
     <form class="filters" id="pFilters">
       <select name="milestone_id">${options(msOpts, q.get('milestone_id'), { blank: 'Any milestone' })}</select>
       <select name="ms_status" ${q.get('milestone_id') ? '' : 'disabled'}>${options([['todo', 'Still to do'], ...MS_STATUSES.map((s) => [s, MS_LABEL[s]]), ['overdue', 'Running late']], q.get('ms_status'), { blank: 'Any status' })}</select>
@@ -438,10 +979,13 @@ async function renderPipeline() {
     Object.entries(formData(form)).forEach(([k, v]) => { if (v || k === 'status') p.set(k, v); });
     if (!p.get('milestone_id')) p.delete('ms_status');
     const st = 'state' in over ? over.state : stateSel; if (st) p.set('state', st);
+    if ('mine' in over ? over.mine : mine) p.set('mine', '1');
     location.hash = `#/pipeline?${p}`;
   };
+  $('#mineToggle')?.addEventListener('click', () => go({ mine: !mine }));
+  bindRebateChips();
   $$('select', form).forEach((s) => (s.onchange = () => go()));
-  $$('.chip', view).forEach((c) => (c.onclick = () => go({ state: c.dataset.state })));
+  $$('.chip[data-state]', view).forEach((c) => (c.onclick = () => go({ state: c.dataset.state })));
   $$('[data-toggle]', view).forEach((b) => (b.onclick = () => {
     if (stateSel) return; // a single selected state always stays open
     const set = getCollapsed(); const k = b.dataset.toggle;
@@ -460,7 +1004,8 @@ async function renderProjects() {
   const q = qs();
   const f = { q: q.get('q') || '', phase: q.get('phase') || '', state: q.get('state') || '', progress: q.get('progress') || '', status: q.get('status') ?? 'open', owner_id: q.get('owner_id') || '', priority: q.get('priority') || '' };
   const params = new URLSearchParams(Object.entries(f).filter(([, v]) => v));
-  const rows = await api('GET', `/api/projects?${params}`);
+  if (f.state === 'mine') { params.delete('state'); params.set('states', myStates().join(',')); }
+  const rows = territoryFirst(await api('GET', `/api/projects?${params}`));
   view.innerHTML = `
     <div class="page-head"><h1>Projects <span class="muted small">${rows.length}</span></h1>
       <div class="actions"><a class="btn" href="/api/projects.csv">Export CSV</a><button class="btn primary" id="newProject">+ New property</button></div></div>
@@ -468,7 +1013,7 @@ async function renderProjects() {
       <input type="search" name="q" placeholder="Search name, code, customer, city…" value="${esc(f.q)}">
       <select name="phase">${options([['diligence', 'Due diligence'], ['pipeline', 'Pipeline']], f.phase, { blank: 'Diligence + pipeline' })}</select>
       <select name="progress">${options([['incomplete', 'Still in progress'], ['complete', 'Live (all done)'], ['overdue', 'Running late']], f.progress, { blank: 'Any progress' })}</select>
-      <select name="state">${options(US_STATES.map(([c, n]) => [c, `${c} · ${n}`]), f.state, { blank: 'All states' })}</select>
+      <select name="state">${options([...(myStates().length ? [['mine', `★ My territory (${myStates().join(', ')})`]] : []), ...US_STATES.map(([c, n]) => [c, `${c} · ${n}`])], f.state, { blank: 'All states' })}</select>
       <select name="status">${options([['open', 'Open'], ...S.meta.enums.projectStatus.map((s) => [s, label(s)])], f.status, { blank: 'All statuses' })}</select>
       <select name="owner_id">${options(S.meta.users.map((u) => [u.id, u.name]), f.owner_id, { blank: 'All owners' })}</select>
       <select name="priority">${options(S.meta.enums.priority, f.priority, { blank: 'Any priority' })}</select>
@@ -496,15 +1041,23 @@ async function renderProjects() {
 }
 
 function projectForm(p = null, { phase = 'diligence' } = {}) {
-  const e = S.meta.enums; const v = p || { status: 'active', priority: 'medium', owner_id: S.me.id };
+  const e = S.meta.enums; const v = p || { status: 'active', priority: 'medium', owner_id: S.me.id, tax_credit_eligible: 'unknown' };
   const isDD = p ? p.phase === 'diligence' : phase === 'diligence';
   const startOpts = [['dd', 'Due diligence (recommended)'], ['pipeline', 'Pipeline (skip due diligence)']];
   const ddSection = `<h3 class="full" style="margin:6px 0 0">Due diligence <span class="muted small" style="font-weight:500">— owner, rebate and utility are needed before moving to the pipeline</span></h3>
       <label>Property owner${isDD ? ' *' : ''}<input name="property_owner" value="${esc(v.property_owner)}" placeholder="Who owns the property"></label>
       <label>Owner contact<input name="property_owner_contact" value="${esc(v.property_owner_contact)}" placeholder="Phone or email"></label>
-      <label>Utility company${isDD ? ' *' : ''}<input name="utility_company" value="${esc(v.utility_company)}" placeholder="e.g. Austin Energy"></label>
-      <label>Rebate the site qualifies for${isDD ? ' *' : ''}<input name="rebate_program" value="${esc(v.rebate_program)}" placeholder="Program name, or &quot;None&quot;"></label>
-      <label>Rebate amount (USD)<input name="rebate_amount" type="number" min="0" step="any" value="${esc(v.rebate_amount)}"></label>
+      <label class="full">Utility company${isDD ? ' *' : ''}
+        <span class="input-row"><select name="utility_id" id="pfUtility"></select><button type="button" class="btn sm" id="pfNewUtility">+ New utility</button></span></label>
+      <div class="full pick-block"><div class="pick-label">Rebate we're going after${isDD ? ' *' : ''} <span class="muted small" id="pfRebateHint"></span></div>
+        <div id="pfRebates" class="grid" style="gap:6px"></div>
+        <button type="button" class="link-btn small" id="pfAddRebate">+ add another rebate (stacking)</button></div>
+      <label>Not on the board? Type it, or “None”<input name="rebate_program" value="${esc(v.rebate_program)}" placeholder="Only if it isn't on the Rebates board"></label>
+      <label>Expected rebate (USD)<input name="rebate_amount" type="number" min="0" step="any" value="${esc(v.rebate_amount)}"></label>
+      <h3 class="full" style="margin:6px 0 0">Tax credit</h3>
+      <label>Tax credit<select name="tax_credit_id" id="pfTax"></select></label>
+      <label>Eligible?<select name="tax_credit_eligible">${options([['unknown', 'Not checked yet'], ['yes', 'Yes'], ['no', 'No']], v.tax_credit_eligible || 'unknown')}</select></label>
+      <label>Estimated credit (USD)<input name="tax_credit_amount" type="number" min="0" step="any" value="${esc(v.tax_credit_amount)}"></label>
       <label class="full">Due diligence notes<textarea name="diligence_notes" placeholder="Anything found while checking the site">${esc(v.diligence_notes)}</textarea></label>`;
   const card = openModal(`${modalHead(p ? `Edit ${esc(p.code)}` : isDD ? 'New property' : 'New project')}
     <form class="form-grid">
@@ -514,18 +1067,18 @@ function projectForm(p = null, { phase = 'diligence' } = {}) {
       <label>Priority<select name="priority">${options(e.priority, v.priority)}</select></label>
       <label>Owner<select name="owner_id">${userOptions(v.owner_id)}</select></label>
       <label class="full">Hold / blocker reason<input name="hold_reason" value="${esc(v.hold_reason)}" placeholder="Shown when status is on hold or blocked"></label>
+      <h3 class="full" style="margin:6px 0 0">Site</h3>
+      <label class="full">Address<input name="address" value="${esc(v.address)}"></label>
+      <label>City<input name="city" value="${esc(v.city)}"></label>
+      <label>State<select name="state" id="pfState">${stateOptions(v.state)}</select></label>
+      <label>ZIP<input name="zip" value="${esc(v.zip)}"></label>
+      <label>Site type<select name="site_type">${options(e.siteType, v.site_type, { blank: '—' })}</select></label>
       ${isDD ? ddSection : ''}
       <h3 class="full" style="margin:6px 0 0">Customer (no login required)</h3>
       <label>Customer / company<input name="customer_name" value="${esc(v.customer_name)}"></label>
       <label>Contact name<input name="contact_name" value="${esc(v.contact_name)}"></label>
       <label>Contact email<input name="contact_email" type="email" value="${esc(v.contact_email)}"></label>
       <label>Contact phone<input name="contact_phone" value="${esc(v.contact_phone)}"></label>
-      <h3 class="full" style="margin:6px 0 0">Site</h3>
-      <label class="full">Address<input name="address" value="${esc(v.address)}"></label>
-      <label>City<input name="city" value="${esc(v.city)}"></label>
-      <label>State<select name="state">${stateOptions(v.state)}</select></label>
-      <label>ZIP<input name="zip" value="${esc(v.zip)}"></label>
-      <label>Site type<select name="site_type">${options(e.siteType, v.site_type, { blank: '—' })}</select></label>
       <h3 class="full" style="margin:6px 0 0">Charging scope</h3>
       <label>Charger type<select name="charger_type">${options(e.chargerType, v.charger_type, { blank: '—', fmt: (x) => x })}</select></label>
       <label>Number of ports<input name="charger_count" type="number" min="0" value="${esc(v.charger_count)}"></label>
@@ -536,16 +1089,83 @@ function projectForm(p = null, { phase = 'diligence' } = {}) {
       ${isDD ? '' : ddSection}
       <div class="modal-foot full"><button type="button" class="btn" data-close>Cancel</button><button class="btn primary">${p ? 'Save changes' : isDD ? 'Add property' : 'Create project'}</button></div>
     </form>`, { wide: true });
+
+  // the utility, rebate and tax-credit lists follow the site's state
+  let picked = (v.rebates || []).map((r) => String(r.id));
+  if (!picked.length) picked = [''];
+  let utilSel = v.utility_id ? String(v.utility_id) : '';
+  let taxSel = v.tax_credit_id ? String(v.tax_credit_id) : '';
+  const stateNow = () => $('#pfState', card).value;
+  const inState = (st, code) => !st || String(code || '').split(',').includes(st);
+  const rebateOpts = (st, sel) => {
+    const list = S.meta.rebates.filter((r) => r.kind !== 'tax_credit' && (!st || r.state === st || r.state === 'US'));
+    const lbl = (r) => `${r.name}${r.state === 'US' ? ' (federal)' : st ? '' : ` (${r.state})`}${r.status !== 'open' ? ` · ${REBATE_STATUS[r.status]}` : ''}`;
+    return `<option value="">${st ? `— choose a ${st} rebate —` : '— choose —'}</option>${list.map((r) => `<option value="${r.id}" ${String(r.id) === sel ? 'selected' : ''}>${esc(lbl(r))}</option>`).join('')}`;
+  };
+  const draw = () => {
+    const st = stateNow();
+    const utils = S.meta.utilities;
+    const here = utils.filter((u) => st && inState(st, u.states)); const other = utils.filter((u) => !here.includes(u));
+    $('#pfUtility', card).innerHTML = `<option value="">— choose —</option>`
+      + (here.length ? `<optgroup label="Utilities in ${esc(st)}">${here.map((u) => `<option value="${u.id}" ${String(u.id) === utilSel ? 'selected' : ''}>${esc(u.name)}</option>`).join('')}</optgroup>` : '')
+      + (other.length ? `<optgroup label="${here.length ? 'Other utilities' : 'Utilities'}">${other.map((u) => `<option value="${u.id}" ${String(u.id) === utilSel ? 'selected' : ''}>${esc(u.name)}${u.states ? ` (${esc(u.states)})` : ''}</option>`).join('')}</optgroup>` : '');
+    $('#pfRebates', card).innerHTML = picked.map((sel, i) => `<div class="input-row">
+        <select data-rebate-sel="${i}" aria-label="Rebate">${rebateOpts(st, sel)}</select>
+        <button type="button" class="btn sm" data-rinfo="${i}" title="What is this rebate?" ${sel ? '' : 'disabled'}>ⓘ</button>
+        ${i > 0 ? `<button type="button" class="btn sm" data-rdel="${i}" title="Remove">✕</button>` : ''}</div>`).join('');
+    const n = S.meta.rebates.filter((r) => r.kind !== 'tax_credit' && (r.state === st || r.state === 'US')).length;
+    $('#pfRebateHint', card).textContent = st ? `${n} on the board for ${st} + federal` : 'pick the state above to narrow the list';
+    const tax = S.meta.rebates.filter((r) => r.kind === 'tax_credit' && (!st || r.state === st || r.state === 'US'));
+    $('#pfTax', card).innerHTML = `<option value="">— none / not sure —</option>${tax.map((r) => `<option value="${r.id}" ${String(r.id) === taxSel ? 'selected' : ''}>${esc(r.name)}${r.state === 'US' ? ' (federal)' : ''}${r.status !== 'open' ? ` · ${REBATE_STATUS[r.status]}` : ''}</option>`).join('')}`;
+    $$('[data-rebate-sel]', card).forEach((s) => (s.onchange = () => { picked[Number(s.dataset.rebateSel)] = s.value; draw(); }));
+    $$('[data-rinfo]', card).forEach((b) => (b.onclick = () => { const id = picked[Number(b.dataset.rinfo)]; if (id) rebatePeek(id); }));
+    $$('[data-rdel]', card).forEach((b) => (b.onclick = () => { picked.splice(Number(b.dataset.rdel), 1); draw(); }));
+  };
+  if ($('#pfUtility', card)) {
+    $('#pfState', card).addEventListener('change', draw);
+    $('#pfUtility', card).addEventListener('change', (ev) => { utilSel = ev.target.value; });
+    $('#pfTax', card).addEventListener('change', (ev) => { taxSel = ev.target.value; });
+    $('#pfAddRebate', card).onclick = () => { picked.push(''); draw(); };
+    $('#pfNewUtility', card).onclick = async () => {
+      const name = prompt('Name of the utility company to add to the directory:');
+      if (!name || !name.trim()) return;
+      try {
+        const u = await api('POST', '/api/utilities', { name: name.trim(), states: stateNow() });
+        await loadMeta(); utilSel = String(u.id); draw(); toast(`Added ${u.name} to the utility directory`);
+      } catch (err) { fail(err); }
+    };
+    draw();
+  }
+
   $('form', card).addEventListener('submit', async (ev) => {
     ev.preventDefault();
     try {
       const data = formData(ev.target);
       if (!p) { data.phase = data.start === 'dd' ? 'diligence' : 'pipeline'; delete data.start; }
+      if ($('#pfRebates', card)) data.rebate_ids = picked.filter(Boolean);
       const saved = p ? await api('PATCH', `/api/projects/${p.id}`, data) : await api('POST', '/api/projects', data);
       modalClose = null; closeModal(); toast(p ? 'Project saved' : saved.phase === 'diligence' ? `Added ${saved.code} to due diligence` : `Created ${saved.code}`);
       if (p) route(); else location.hash = `#/projects/${saved.id}`;
     } catch (err) { fail(err); }
   });
+}
+
+// quick look at a rebate from inside the property form (a small panel, so the form stays open)
+async function rebatePeek(id) {
+  const r = await api('GET', `/api/rebates/${id}`).catch(fail);
+  if (!r) return;
+  const reqs = String(r.requirements || '').split('\n').map((x) => x.replace(/^[-•*]\s*/, '').trim()).filter(Boolean);
+  const box = document.createElement('div');
+  box.className = 'peek';
+  box.innerHTML = `<div class="modal-head"><b>${esc(r.name)}</b><button class="x" aria-label="Close">×</button></div>
+    <div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:8px">${rebateStatusBadge(r.status)} ${needsCheck(r)}</div>
+    ${r.amount_text ? `<div><b>${esc(r.amount_text)}</b></div>` : ''}
+    ${r.deadline ? `<div class="small muted">${esc(deadlineText(r.deadline))}</div>` : ''}
+    ${r.summary ? `<p class="small" style="white-space:pre-wrap">${esc(r.summary)}</p>` : ''}
+    ${r.offer ? `<div class="offer-box small"><b>🔌 Chargers we can offer:</b> <span style="white-space:pre-wrap">${esc(r.offer)}</span></div>` : ''}
+    ${reqs.length ? `<div class="small" style="margin-top:8px"><b>Requirements</b><ul class="req-list">${reqs.map((x) => `<li>${esc(x)}</li>`).join('')}</ul></div>` : ''}`;
+  document.body.appendChild(box);
+  $('.x', box).onclick = () => box.remove();
 }
 
 // ---------- site chat ----------
@@ -568,7 +1188,7 @@ function chatItem(x, inMain) {
     <div class="msg-main">
       <div class="msg-head"><b>${esc(x.user_name || 'Former user')}</b>${inMain ? msTag(x, true) : ''}<span class="muted small">${fdatetime(x.created_at)}</span>
         ${mine || S.me.role === 'admin' ? `<button type="button" class="msg-del" data-del="${x.id}" title="Delete message" aria-label="Delete message">✕</button>` : ''}</div>
-      <div class="msg-body">${esc(x.body)}</div>
+      <div class="msg-body">${markMentions(esc(x.body))}</div>
     </div></div>`;
 }
 
@@ -580,7 +1200,7 @@ async function mountChat(el, p, milestoneId, { onOpenMilestone, onChange } = {})
     <div class="chat-log" aria-live="polite"><div class="empty">Loading…</div></div>
     <form class="chat-form">
       ${canTag ? `<select name="milestone_id" aria-label="About">${options(S.meta.milestones.map((x) => [x.id, x.name]), '', { blank: 'General' })}</select>` : ''}
-      <textarea name="body" rows="2" required placeholder="${m ? `Message about ${esc(m.name)}… (also shows in the site chat)` : 'Message the team about this site…'}  Enter to send, Shift+Enter for a new line"></textarea>
+      <textarea name="body" rows="2" required placeholder="${m ? `Message about ${esc(m.name)}… (also shows in the site chat)` : 'Message the team about this site… Type @ to mention someone.'}  Enter to send, Shift+Enter for a new line"></textarea>
       <button class="btn primary">Send</button>
     </form></div>`;
   const log = $('.chat-log', el); const form = $('.chat-form', el);
@@ -605,6 +1225,7 @@ async function mountChat(el, p, milestoneId, { onOpenMilestone, onChange } = {})
   // pick up teammates' messages; stops by itself once the chat is closed
   const timer = setInterval(() => { if (!el.isConnected) clearInterval(timer); else load().catch(() => {}); }, 10000);
   const ta = $('textarea', form);
+  attachMentionPicker(ta); // must come first so Enter can pick a name
   ta.addEventListener('keydown', (e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); form.requestSubmit(); } });
   form.addEventListener('submit', async (e) => {
     e.preventDefault();
@@ -663,7 +1284,10 @@ async function renderProject(id) {
       </div>
     </div>
     ${dd ? `<div class="card dd-card"><h2 style="margin-bottom:8px">Due diligence checklist</h2>
-      <div class="checks big">${DD_CHECKS.map(([k, t]) => `<span class="chk ${String(p[k] ?? '').trim() ? 'ok' : ''}">${String(p[k] ?? '').trim() ? '✓' : '○'} ${esc(t)}${String(p[k] ?? '').trim() ? `: <b>${esc(p[k])}</b>` : ''}</span>`).join('')}</div>
+      <div class="checks big">${DD_CHECKS.map(([k, t]) => {
+        const val = k === 'rebate_program' && p.rebates.length ? p.rebates.map((r) => r.name).join(' + ') : p[k];
+        return `<span class="chk ${ddHas(p, k) ? 'ok' : ''}">${ddHas(p, k) ? '✓' : '○'} ${esc(t)}${ddHas(p, k) ? `: <b>${esc(val)}</b>` : ''}</span>`;
+      }).join('')}</div>
       <div class="small muted" style="margin-top:8px">${missing.length ? `Still needed: ${missing.map(([, t]) => esc(t)).join(', ')}. Click <b>Edit</b> to fill them in.` : 'All checks done. Click <b>Move to pipeline</b> to start tracking milestones.'}</div></div>`
     : `<div class="card"><h2 style="margin-bottom:4px">Milestones <span class="muted small">— ${p.ms_complete ? 'all done, this site is live 🎉' : `${p.ms_done} of ${p.ms_total} done · finish them in any order`}</span></h2>${msEditor(p)}</div>`}
     <div class="cols-main" style="margin-top:16px">
@@ -675,10 +1299,13 @@ async function renderProject(id) {
         <div class="card"><h2>Due diligence</h2><dl class="kv">
           <dt>Property owner</dt><dd>${esc(p.property_owner || '—')}</dd>
           <dt>Owner contact</dt><dd>${esc(p.property_owner_contact || '—')}</dd>
-          <dt>Rebate</dt><dd>${esc(p.rebate_program || '—')}${p.rebate_amount ? ` · ${money(p.rebate_amount)}` : ''}</dd>
-          <dt>Utility</dt><dd>${esc(p.utility_company || '—')}</dd>
+          <dt>Rebate</dt><dd>${p.rebates.map(rebateChip).join(' ')}${p.rebate_program ? `${p.rebates.length ? '<br>' : ''}${esc(p.rebate_program)}` : p.rebates.length ? '' : '—'}${p.rebate_amount ? `<div class="muted small">expected ${money(p.rebate_amount)}</div>` : ''}</dd>
+          <dt>Utility</dt><dd>${p.utility_id ? `<a href="#/utilities/${p.utility_id}">${esc(p.utility_company)}</a>` : esc(p.utility_company || '—')}</dd>
+          <dt>Tax credit</dt><dd>${p.tax_credit_id ? rebateChip(S.meta.rebates.find((r) => r.id === p.tax_credit_id) || { id: p.tax_credit_id, name: 'Tax credit' }) : '—'}
+            <div class="muted small">${{ yes: 'Eligible', no: 'Not eligible', unknown: 'Eligibility not checked yet' }[p.tax_credit_eligible || 'unknown']}${p.tax_credit_amount ? ` · est. ${money(p.tax_credit_amount)}` : ''}</div></dd>
           ${p.diligence_completed_at ? `<dt>Completed</dt><dd>${fdate(p.diligence_completed_at)}</dd>` : ''}
         </dl>${p.diligence_notes ? `<h3 style="margin-top:14px">Notes</h3><div style="white-space:pre-wrap">${esc(p.diligence_notes)}</div>` : ''}</div>
+        <div class="card" id="remCard"></div>
         <div class="card"><h2>Customer</h2><dl class="kv">
           <dt>Company</dt><dd>${esc(p.customer_name || '—')}</dd>
           <dt>Contact</dt><dd>${esc(p.contact_name || '—')}</dd>
@@ -702,6 +1329,8 @@ async function renderProject(id) {
   $('#editProject').onclick = () => projectForm(p);
   $('#promote')?.addEventListener('click', () => promoteModal(p, route));
   bindMsEditor(view, () => route(), () => p);
+  bindRebateChips();
+  projectRemindersCard(p, $('#remCard')).catch(() => {});
   $('#quickStatus').onchange = async (e) => {
     const status = e.target.value; let hold_reason;
     if (['on_hold', 'blocked', 'lost', 'cancelled'].includes(status)) {
@@ -936,15 +1565,16 @@ async function renderAdmin() {
     <div class="cols-2">
       <div class="card"><div style="display:flex;justify-content:space-between;align-items:center"><h2>Staff users</h2><button class="btn primary sm" id="addUser">+ Add user</button></div>
         <p class="muted small">Only Evium staff sign in. Customers are stored as contacts on each project and never need an account.</p>
-        <div class="table-wrap" style="box-shadow:none"><table><thead><tr><th>Name</th><th>Role</th><th>Status</th><th></th></tr></thead><tbody>
-        ${users.map((u) => `<tr><td><b>${esc(u.name)}</b><div class="muted small">${esc(u.email)}</div></td><td>${esc(label(u.role))}</td>
+        <div class="table-wrap" style="box-shadow:none"><table><thead><tr><th>Name</th><th>Role</th><th>Territory</th><th>Status</th><th></th></tr></thead><tbody>
+        ${users.map((u) => `<tr><td><b>${esc(u.name)}</b><div class="muted small">${esc(u.email)}</div></td><td>${esc(label(u.role))}</td><td>${esc((u.states || '').replace(/,/g, ', ') || '—')}</td>
           <td>${u.active ? badge('s-active', 'Active') : badge('s-cancelled', 'Disabled')}</td>
           <td style="text-align:right"><button class="btn sm" data-edituser="${u.id}">Edit</button></td></tr>`).join('')}
         </tbody></table></div></div>
       <div class="card"><h2>Milestones</h2>
         <p class="muted small">Every project tracks each of these, in any order, and can mark any of them “not needed”. The order is just how they're displayed.
-          <b>Target days</b> is how long a milestone can be in progress before it's flagged as running late.</p>
-        <div class="ms-admin-head small muted"><span>Colour</span><span>Name</span><span>Target days</span><span></span><span></span></div>
+          <b>Target days</b> is how long a milestone can be in progress before it's flagged as running late.
+          <b>Needs document</b> blocks marking it done until that kind of document is uploaded to the project.</p>
+        <div class="ms-admin-head small muted"><span>Colour</span><span>Name</span><span>Target days</span><span>Needs document</span><span></span><span></span></div>
         <div id="msList" class="grid" style="gap:6px"></div>
         <div style="display:flex;justify-content:space-between;margin-top:12px"><button class="btn sm" id="addMs">+ Add milestone</button><button class="btn primary sm" id="saveMs">Save milestones</button></div>
       </div>
@@ -954,6 +1584,7 @@ async function renderAdmin() {
       <input type="color" value="${esc(m.color)}" data-k="color" style="padding:2px;height:34px" aria-label="Colour">
       <input value="${esc(m.name)}" data-k="name" placeholder="Milestone name" aria-label="Name">
       <input type="number" min="1" value="${esc(m.sla_days)}" data-k="sla_days" aria-label="Target days">
+      <select data-k="required_docs" aria-label="Needs document">${options(S.meta.enums.docCategory, String(m.required_docs || '').split(',')[0], { blank: 'Nothing' })}</select>
       <span style="display:flex;gap:2px"><button class="btn sm" data-mv="-1" title="Move up">↑</button><button class="btn sm" data-mv="1" title="Move down">↓</button></span>
       <button class="btn sm danger" data-rm title="Remove">✕</button></div>`).join('');
     $$('#msList [data-i]').forEach((row) => {
@@ -982,13 +1613,21 @@ function userForm(u = null) {
       <label>Role<select name="role">${options(['staff', 'admin'], u?.role || 'staff')}</select></label>
       ${u ? `<label>Status<select name="active">${options([['1', 'Active'], ['0', 'Disabled']], u.active ? '1' : '0')}</select></label>` : ''}
       <label class="full">${u ? 'Reset password (leave blank to keep)' : 'Temporary password (min 8)'}<input name="password" type="text" ${u ? '' : 'required'} minlength="8" autocomplete="off"></label>
+      <fieldset class="checkset full"><legend>Territory — they see these states first and hear about new sites there</legend>
+        ${[...new Set([...CORE_STATES, ...S.meta.statesInUse, ...String(u?.states || '').split(',').filter(Boolean)])].map((st) => `<label><input type="checkbox" name="st_${st}" ${String(u?.states || '').split(',').includes(st) ? 'checked' : ''}> ${st}</label>`).join('')}</fieldset>
       <div class="modal-foot full"><button type="button" class="btn" data-close>Cancel</button><button class="btn primary">${u ? 'Save' : 'Create user'}</button></div>
     </form>`);
   $('form', card).addEventListener('submit', async (e) => {
     e.preventDefault();
     const d = formData(e.target);
+    d.states = Object.keys(d).filter((k) => k.startsWith('st_')).map((k) => k.slice(3));
+    Object.keys(d).filter((k) => k.startsWith('st_')).forEach((k) => delete d[k]);
     if (u) { d.active = d.active === '1'; if (!d.password) delete d.password; }
-    try { u ? await api('PATCH', `/api/users/${u.id}`, d) : await api('POST', '/api/users', d); await loadMeta(); closeModal(); toast('User saved'); renderAdmin(); } catch (err) { fail(err); }
+    try {
+      u ? await api('PATCH', `/api/users/${u.id}`, d) : await api('POST', '/api/users', d);
+      if (u && u.id === S.me.id) S.me = await api('GET', '/api/me');
+      await loadMeta(); closeModal(); toast('User saved'); renderAdmin();
+    } catch (err) { fail(err); }
   });
 }
 

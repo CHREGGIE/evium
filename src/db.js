@@ -265,6 +265,131 @@ if (db.prepare('SELECT COUNT(*) c FROM milestones').get().c === 0) {
   }))();
 }
 
+// ---------- utilities, rebates, notifications, reminders ----------
+db.exec(`
+-- Utility directory: every site links to its utility
+CREATE TABLE IF NOT EXISTS utilities (
+  id INTEGER PRIMARY KEY,
+  name TEXT NOT NULL UNIQUE COLLATE NOCASE,
+  states TEXT,                 -- e.g. "NY" or "NY,NJ"
+  website TEXT,
+  phone TEXT,
+  contact_name TEXT,
+  contact_email TEXT,
+  contact_phone TEXT,
+  make_ready_program TEXT,
+  approval_days INTEGER,       -- typical days for the utility to approve / energize
+  notes TEXT,
+  updated_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+-- Rebate board. state = two-letter code, or 'US' for federal programs
+CREATE TABLE IF NOT EXISTS rebates (
+  id INTEGER PRIMARY KEY,
+  name TEXT NOT NULL,
+  state TEXT NOT NULL,
+  provider TEXT,
+  kind TEXT NOT NULL DEFAULT 'rebate' CHECK (kind IN ('rebate','grant','make_ready','tax_credit')),
+  status TEXT NOT NULL DEFAULT 'open' CHECK (status IN ('open','upcoming','waitlist','closed')),
+  amount_text TEXT,            -- e.g. "$4,000 per L2 port, up to $40,000 per site"
+  max_amount REAL,             -- biggest amount one site can get, for totals
+  charger_types TEXT,          -- 'L2', 'DCFC' or 'L2,DCFC'
+  site_types TEXT,             -- comma list, empty = any
+  utility_id INTEGER REFERENCES utilities(id) ON DELETE SET NULL,
+  opens_on TEXT,
+  deadline TEXT,
+  url TEXT,
+  summary TEXT,                -- what it is
+  offer TEXT,                  -- chargers we can offer (internal, for sales)
+  requirements TEXT,           -- one requirement per line
+  notes TEXT,
+  verified INTEGER NOT NULL DEFAULT 0,   -- 0 = needs checking
+  updated_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_rebates_state ON rebates(state);
+
+-- Rebates a site is going after (usually one)
+CREATE TABLE IF NOT EXISTS project_rebates (
+  project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  rebate_id INTEGER NOT NULL REFERENCES rebates(id) ON DELETE CASCADE,
+  position INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY (project_id, rebate_id)
+);
+
+-- In-app notifications (mentions, reminders, new sites in your territory, messages on your sites)
+CREATE TABLE IF NOT EXISTS notifications (
+  id INTEGER PRIMARY KEY,
+  user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  kind TEXT NOT NULL,
+  project_id INTEGER REFERENCES projects(id) ON DELETE CASCADE,
+  milestone_id INTEGER REFERENCES milestones(id) ON DELETE SET NULL,
+  actor_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  text TEXT NOT NULL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  read_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_notif_user ON notifications(user_id, read_at, id);
+
+-- Follow-up reminders on a site or one of its milestones
+CREATE TABLE IF NOT EXISTS reminders (
+  id INTEGER PRIMARY KEY,
+  project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  milestone_id INTEGER REFERENCES milestones(id) ON DELETE SET NULL,
+  user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  created_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  due_on TEXT NOT NULL,
+  text TEXT NOT NULL,
+  done_at TEXT,
+  notified_at TEXT,
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_reminders_user ON reminders(user_id, done_at, due_on);
+`);
+
+// new columns on existing tables
+function addColumns(table, cols) {
+  const have = new Set(db.prepare(`PRAGMA table_info(${table})`).all().map((c) => c.name));
+  const added = [];
+  for (const [col, def] of Object.entries(cols)) if (!have.has(col)) { db.exec(`ALTER TABLE ${table} ADD COLUMN ${col} ${def}`); added.push(col); }
+  return added;
+}
+addColumns('projects', {
+  utility_id: 'INTEGER REFERENCES utilities(id) ON DELETE SET NULL',
+  tax_credit_id: 'INTEGER REFERENCES rebates(id) ON DELETE SET NULL',
+  tax_credit_eligible: "TEXT NOT NULL DEFAULT 'unknown'",   // yes / no / unknown
+  tax_credit_amount: 'REAL',
+  lat: 'REAL', lng: 'REAL', geocoded_at: 'TEXT',
+});
+addColumns('users', { states: 'TEXT' });   // territory, e.g. "NY,NJ"
+// Documents that must be uploaded before a milestone can be marked done (document categories)
+if (addColumns('milestones', { required_docs: 'TEXT' }).length) {
+  const DEFAULT_DOCS = { 'Site walk': 'photo', 'Proposal': 'proposal', 'Contract': 'contract', 'Permitting': 'permit', 'Installation': 'photo' };
+  const upd = db.prepare('UPDATE milestones SET required_docs = ? WHERE name = ?');
+  Object.entries(DEFAULT_DOCS).forEach(([name, cat]) => upd.run(cat, name));
+}
+
+// One-time: turn the typed-in utility names on existing sites into directory entries
+{
+  const loose = db.prepare("SELECT id, utility_company, state FROM projects WHERE utility_id IS NULL AND TRIM(COALESCE(utility_company,'')) <> ''").all();
+  if (loose.length) {
+    const find = db.prepare('SELECT * FROM utilities WHERE name = ?');
+    const ins = db.prepare('INSERT INTO utilities (name, states) VALUES (?,?)');
+    const addState = db.prepare('UPDATE utilities SET states = ? WHERE id = ?');
+    const link = db.prepare('UPDATE projects SET utility_id = ? WHERE id = ?');
+    db.transaction(() => loose.forEach((p) => {
+      const name = p.utility_company.trim();
+      let u = find.get(name);
+      if (!u) { ins.run(name, p.state || null); u = find.get(name); }
+      else if (p.state && !(u.states || '').split(',').includes(p.state)) addState.run([u.states, p.state].filter(Boolean).join(','), u.id);
+      link.run(u.id, p.id);
+    }))();
+  }
+}
+
 function hashPassword(pw) {
   const salt = crypto.randomBytes(16).toString('hex');
   const hash = crypto.scryptSync(pw, salt, 64).toString('hex');
