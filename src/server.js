@@ -129,6 +129,15 @@ function setDuties(userId, body) {
     db.prepare('UPDATE users SET milestone_ids = ? WHERE id = ?').run([...new Set(ids)].join(',') || null, userId);
   }
 }
+app.put('/api/me/dashboard', wrap((req, res) => {
+  const ok = (id) => /^(kpis|ms_chart|attention|dd|review|grants|sites|reminders|tickets|activity|ms:\d+)$/.test(String(id));
+  const clean = (list) => [...new Set((Array.isArray(list) ? list : []).filter(ok).map(String))].slice(0, 40);
+  const body = req.body;
+  const layout = body && (body.main || body.side) ? { main: clean(body.main), side: clean(body.side) } : null; // null = back to the default
+  db.prepare('UPDATE users SET dashboard = ? WHERE id = ?').run(layout ? JSON.stringify(layout) : null, req.user.id);
+  res.json({ layout });
+}));
+
 app.patch('/api/me/duties', wrap((req, res) => {
   setDuties(req.user.id, req.body || {});
   res.json(db.prepare('SELECT id, name, email, role, active, states, can_review, dd_assessor, milestone_ids, title, is_exec, grants FROM users WHERE id = ?').get(req.user.id));
@@ -149,7 +158,7 @@ const getMilestones = () => db.prepare('SELECT * FROM milestones ORDER BY positi
 app.get('/api/meta', (req, res) => {
   res.json({
     milestones: getMilestones(),
-    users: db.prepare('SELECT id, name, email, role, active, states, can_review, dd_assessor, milestone_ids, title, is_exec, grants FROM users ORDER BY name').all(),
+    users: db.prepare('SELECT id, name, email, role, active, states, can_review, dd_assessor, milestone_ids, title, is_exec, grants, dashboard FROM users ORDER BY name').all(),
     utilities: db.prepare('SELECT id, name, states FROM utilities ORDER BY name').all(),
     rebates: db.prepare('SELECT id, name, state, kind, status, amount_text, provider FROM rebates ORDER BY state, name').all(),
     statesInUse: db.prepare("SELECT DISTINCT state FROM projects WHERE state IS NOT NULL AND state <> '' UNION SELECT DISTINCT state FROM rebates WHERE state <> 'US'").all().map((r) => r.state).sort(),
@@ -427,14 +436,15 @@ app.get('/api/dashboard', wrap((req, res) => {
     LEFT JOIN users u ON u.id = a.user_id LEFT JOIN projects p ON p.id = a.project_id
     ORDER BY a.id DESC LIMIT 15`).all();
 
-  // ---- your work (an executive can look at anyone's) ----
+  // ---- the dashboard's owner: you, or whoever you switched to ----
   let me = db.prepare('SELECT * FROM users WHERE id = ?').get(req.user.id);
   if (req.query.as && Number(req.query.as) !== me.id) {
-    if (!canSeeTeam(req.user)) throw new HttpError(403, 'Only executives can view other people\'s dashboards');
     me = db.prepare('SELECT * FROM users WHERE id = ?').get(Number(req.query.as)) || notFound('User not found');
   }
-  const mine = workFor(me, open);
-  mine.viewing = { id: me.id, name: me.name, title: me.title };
+  const mine = workFor(me, open, { everything: true });
+  let layout = null; try { layout = me.dashboard ? JSON.parse(me.dashboard) : null; } catch { layout = null; }
+  mine.viewing = { id: me.id, name: me.name, title: me.title, role: me.role, states: me.states, is_exec: me.is_exec,
+    dd_assessor: me.dd_assessor, can_review: me.can_review, grants: me.grants, milestone_ids: me.milestone_ids, layout };
   const theirTickets = me.id === req.user.id ? myTickets : db.prepare(`SELECT t.id, t.title, t.status, t.priority, t.due_date, p.id AS project_id, p.code, p.name AS project_name
     FROM tickets t JOIN projects p ON p.id = t.project_id WHERE t.assignee_id = ? AND t.status NOT IN ('resolved','closed')
     ORDER BY (t.due_date IS NULL), t.due_date LIMIT 20`).all(me.id);
@@ -444,23 +454,24 @@ app.get('/api/dashboard', wrap((req, res) => {
 const canSeeTeam = (u) => u.role === 'admin' || !!u.is_exec;
 
 // Everything waiting for one person, based on what they're responsible for.
-function workFor(me, open) {
+function workFor(me, open, { everything = false } = {}) {
   const myStates = String(me.states || '').split(',').filter(Boolean);
   const inScope = (p) => !myStates.length || myStates.includes(p.state);  // a territory limits milestone work to those states
   const mine = { scoped: myStates, dd: null, review: null, milestones: [] };
-  if (me.dd_assessor) {
+  if (me.dd_assessor || everything) {
     mine.dd = attachMilestones(db.prepare(`${PROJECT_SELECT} WHERE p.phase = 'diligence' AND p.dd_stage = 'new' AND p.status IN ${OPEN}
       ORDER BY (p.dd_review_note IS NULL), p.created_at`).all());
     mine.dd_waiting = db.prepare(`SELECT COUNT(*) c FROM projects WHERE phase = 'diligence' AND dd_stage = 'review' AND status IN ${OPEN}`).get().c;
   }
-  if (me.can_review) { // only the people set to run the 10:30 review (admins can still approve from Due Diligence)
+  if (me.can_review || everything) { // only the people set to run the 10:30 review (admins can still approve from Due Diligence)
     mine.review = attachMilestones(db.prepare(`${PROJECT_SELECT} WHERE p.phase = 'diligence' AND p.dd_stage = 'review' AND p.status IN ${OPEN}
       ORDER BY p.dd_rating DESC, p.dd_assessed_at`).all());
   }
   const owned = String(me.milestone_ids || '').split(',').map(Number).filter(Boolean);
   const allMs = getMilestones();
+  mine.owned = owned;
   allMs.forEach((m, i) => {
-    if (!owned.includes(m.id)) return;
+    if (!owned.includes(m.id) && !everything) return;
     const prev = allMs[i - 1];
     const slim = (p, extra = {}) => ({ id: p.id, code: p.code, name: p.name, address: p.address, city: p.city, state: p.state, status: p.status, hold_reason: p.hold_reason, ms: p.milestones[i], ...extra });
     const scoped = open.filter(inScope);
@@ -475,7 +486,7 @@ function workFor(me, open) {
 
 
   // grants manager: the rebate board and sites still without a rebate
-  if (me.grants) {
+  if (me.grants || everything) {
     mine.grants = {
       needs_check: db.prepare('SELECT id, name, state, status, kind, amount_text, deadline, verified FROM rebates WHERE verified = 0 ORDER BY state, name').all(),
       deadlines: db.prepare(`SELECT id, name, state, status, kind, amount_text, deadline, verified FROM rebates
@@ -484,6 +495,12 @@ function workFor(me, open) {
         WHERE p.status IN ${OPEN} AND COALESCE(p.dd_stage, '') <> 'passed' AND TRIM(COALESCE(p.rebate_program, '')) = ''
           AND NOT EXISTS (SELECT 1 FROM project_rebates pr WHERE pr.project_id = p.id) ORDER BY p.phase, p.created_at DESC LIMIT 30`).all(),
     };
+  }
+  if (everything) {
+    // the sites this person owns, and their reminders
+    mine.sites = attachMilestones(db.prepare(`${PROJECT_SELECT} WHERE p.owner_id = ? AND p.status IN ${OPEN} AND COALESCE(p.dd_stage, '') <> 'passed'
+      ORDER BY p.phase DESC, p.updated_at DESC`).all(me.id));
+    mine.reminders = db.prepare(`${REMINDER_SELECT} WHERE r.user_id = ? AND r.done_at IS NULL ORDER BY r.due_on, r.id LIMIT 50`).all(me.id);
   }
   return mine;
 }

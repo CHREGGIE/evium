@@ -168,7 +168,7 @@ async function route() {
     else if (page === 'diligence') await renderDiligence();
     else if (page === 'pipeline') await renderPipeline();
     else if (page === 'map') await renderMap();
-    else if (page === 'team' && canSeeTeam()) { if (id) await renderDashboard(id); else await renderTeam(); }
+    else if (page === 'team' && canSeeTeam()) { if (id) location.hash = `#/dashboard?as=${id}`; else await renderTeam(); }
     else if (page === 'rebates') await renderRebates();
     else if (page === 'utilities' && id) await renderUtility(id);
     else if (page === 'utilities') await renderUtilities();
@@ -838,7 +838,7 @@ async function renderTeam() {
   };
   view.innerHTML = `
     <div class="page-head"><div><h1>Team</h1><div class="muted small" style="margin-top:4px">Everyone's work right now${totalLate ? ` · <span class="stale">${totalLate} milestone${totalLate === 1 ? '' : 's'} running late</span>` : ''}. Click a person to see their dashboard.</div></div></div>
-    <div class="team-list">${people.map((p) => `<a class="team-row ${p.late ? 'has-late' : ''}" href="#/team/${p.id}">
+    <div class="team-list">${people.map((p) => `<a class="team-row ${p.late ? 'has-late' : ''}" href="#/dashboard?as=${p.id}">
         <span class="avatar big">${esc(initials(p.name))}</span>
         <span class="team-who"><b>${esc(p.name)}</b><span class="muted small">${esc(p.title || label(p.role))}${p.states ? ` · ${esc(p.states.replace(/,/g, ', '))}` : ''}</span></span>
         <span class="team-work">${work(p)}</span>
@@ -856,29 +856,59 @@ const myMilestoneIds = (u = S.me) => String(u?.milestone_ids || '').split(',').m
 const greeting = () => { const h = new Date().getHours(); return h < 12 ? 'Good morning' : h < 17 ? 'Good afternoon' : 'Good evening'; };
 const workSite = (p) => `<span class="work-site"><b>${esc(p.address || p.name)}</b><span class="muted small">${esc([[p.city, p.state].filter(Boolean).join(', '), p.address ? p.name : '', p.code].filter(Boolean).join(' · '))}</span></span>`;
 
-async function renderDashboard(asId) {
-  const d = await api('GET', `/api/dashboard${asId ? `?as=${asId}` : ''}`);
-  const t = d.totals; const mine = d.mine;
-  const other = asId && Number(asId) !== S.me.id ? S.meta.users.find((u) => u.id === Number(asId)) : null;
-  const hasDuties = !!(mine.dd || mine.review || mine.grants || mine.milestones.length);
-  const total = Math.max(1, ...d.milestones.map((m) => m.done + m.in_progress + m.not_started));
+// Dashboard widgets. Each person picks which ones they see and where (Customize); the layout is saved to their account.
+const WIDGETS = {
+  dd: { title: 'Due diligence to assess', link: '#/diligence?tab=new', linkText: 'Open Due Diligence' },
+  review: { title: '10:30 review', link: '#/diligence?tab=review', linkText: 'Start the review' },
+  grants: { title: 'Rebates', link: '#/rebates', linkText: 'Open the Rebates board' },
+  sites: { title: 'My sites', link: '#/pipeline', linkText: 'Pipeline' },
+  kpis: { title: 'Company numbers' },
+  ms_chart: { title: 'Milestones across open projects' },
+  attention: { title: 'Needs attention' },
+  reminders: { title: 'Reminders' },
+  tickets: { title: 'Open tickets', link: '#/tickets', linkText: 'All tickets' },
+  activity: { title: 'Recent activity' },
+};
+const widgetIds = () => ['dd', 'review', 'grants', 'sites', ...S.meta.milestones.map((m) => `ms:${m.id}`), 'kpis', 'ms_chart', 'attention', 'reminders', 'tickets', 'activity'];
+const widgetName = (id) => (id.startsWith('ms:') ? (msById(id.slice(3))?.name || 'Milestone') : WIDGETS[id]?.title || id);
+// the starting layout for someone who hasn't customized, based on their job
+function defaultLayout(u) {
+  const main = [];
+  if (u.dd_assessor) main.push('dd');
+  if (u.can_review) main.push('review');
+  if (u.grants) main.push('grants');
+  myMilestoneIds(u).forEach((id) => main.push(`ms:${id}`));
+  const lead = u.role === 'admin' || u.is_exec;
+  if (lead) main.push('kpis', 'attention', 'ms_chart');
+  else main.push('sites');
+  return { main, side: ['reminders', 'tickets', 'activity'] };
+}
+const validLayout = (l) => {
+  const ok = new Set(widgetIds());
+  return { main: (l.main || []).filter((id) => ok.has(id)), side: (l.side || []).filter((id) => ok.has(id)) };
+};
+let dashEdit = false;
 
-  const ddCard = mine.dd ? `<section class="card work-card">
-      <div class="card-head"><h2>Due diligence to assess <span class="work-n">${mine.dd.length}</span></h2><a class="small" href="#/diligence?tab=new">Open Due Diligence ›</a></div>
-      ${mine.dd_waiting ? `<div class="muted small" style="margin:-4px 0 8px">${mine.dd_waiting} already waiting for the 10:30 review.</div>` : ''}
+async function renderDashboard(asId) {
+  asId = asId || qs().get('as') || '';
+  const d = await api('GET', `/api/dashboard${asId ? `?as=${asId}` : ''}`);
+  const t = d.totals; const mine = d.mine; const who = mine.viewing;
+  const own = who.id === S.me.id;
+  if (!own) dashEdit = false;
+  let layout = validLayout(who.layout || defaultLayout(who));
+  const total = Math.max(1, ...d.milestones.map((m) => m.done + m.in_progress + m.not_started));
+  const first = who.name.split(' ')[0];
+
+  // ---- each widget: [count, body] ----
+  const W = {
+    dd: () => [mine.dd.length, `${mine.dd_waiting ? `<div class="muted small" style="margin:-4px 0 8px">${mine.dd_waiting} already waiting for the 10:30 review.</div>` : ''}
       <div class="work-list">${mine.dd.map((p) => `<div class="work-row">
           <a class="work-link" href="#/projects/${p.id}">${workSite(p)}</a>
           <span class="work-meta">${p.dd_review_note ? `<span class="work-flag">Sent back: ${esc(p.dd_review_note)}</span>` : `${p.days_in_phase} day${p.days_in_phase === 1 ? '' : 's'} waiting`}</span>
-          <button class="btn sm ${p.dd_review_note ? '' : 'primary'}" data-assess="${p.id}">${p.dd_rating ? 'Finish' : 'Assess'}</button></div>`).join('')
-        || '<div class="work-empty">All caught up.</div>'}</div></section>` : '';
-
-  const reviewCard = mine.review ? `<section class="card work-card">
-      <div class="card-head"><h2>10:30 review <span class="work-n">${mine.review.length}</span></h2><a class="small" href="#/diligence?tab=review">Start the review ›</a></div>
-      <div class="work-list">${mine.review.map((p) => `<a class="work-row" href="#/diligence?tab=review">${workSite(p)}<span class="work-meta">${ratingView(p.dd_rating)}</span><span class="work-chev">›</span></a>`).join('')
-        || '<div class="work-empty">Nothing waiting for review.</div>'}</div></section>` : '';
-
-  const grantsCard = mine.grants ? `<section class="card work-card">
-      <div class="card-head"><h2>Rebates <span class="work-n">${mine.grants.needs_check.length + mine.grants.deadlines.length + mine.grants.no_rebate.length}</span></h2><a class="small" href="#/rebates">Open the Rebates board ›</a></div>
+          <button class="btn sm ${p.dd_review_note ? '' : 'primary'}" data-assess="${p.id}">${p.dd_rating ? 'Finish' : 'Assess'}</button></div>`).join('') || '<div class="work-empty">All caught up.</div>'}</div>`],
+    review: () => [mine.review.length, `<div class="work-list">${mine.review.map((p) => `<a class="work-row" href="#/diligence?tab=review">${workSite(p)}<span class="work-meta">${ratingView(p.dd_rating)}</span><span class="work-chev">›</span></a>`).join('')
+      || '<div class="work-empty">Nothing waiting for review.</div>'}</div>`],
+    grants: () => [mine.grants.deadlines.length + mine.grants.no_rebate.length + mine.grants.needs_check.length, `
       <div class="work-sub">Deadlines in the next 60 days <span class="muted">${mine.grants.deadlines.length}</span></div>
       <div class="work-list">${mine.grants.deadlines.map((r) => `<button type="button" class="work-row as-btn" data-rebate="${r.id}"><span class="work-site"><b>${esc(r.name)}</b><span class="muted small">${esc(regionName(r.state))}</span></span>
           <span class="work-meta"><span class="${daysUntil(r.deadline) <= 14 ? 'stale' : ''}">${esc(deadlineText(r.deadline))}</span></span><span class="work-chev">›</span></button>`).join('') || '<div class="work-empty">No deadlines coming up.</div>'}</div>
@@ -886,12 +916,37 @@ async function renderDashboard(asId) {
       <div class="work-list">${mine.grants.no_rebate.map((p) => `<a class="work-row" href="#/projects/${p.id}">${workSite(p)}<span class="work-meta">${p.phase === 'diligence' ? 'Due diligence' : 'Pipeline'}</span><span class="work-chev">›</span></a>`).join('') || '<div class="work-empty">Every site has a rebate picked.</div>'}</div>
       <div class="work-sub">Needs checking <span class="muted">${mine.grants.needs_check.length}</span></div>
       <div class="work-list">${mine.grants.needs_check.map((r) => `<button type="button" class="work-row as-btn" data-rebate="${r.id}"><span class="work-site"><b>${esc(r.name)}</b><span class="muted small">${esc(regionName(r.state))} · ${esc(REBATE_KIND[r.kind])}</span></span>
-          <span class="work-meta">${rebateStatusBadge(r.status)}</span><span class="work-chev">›</span></button>`).join('') || '<div class="work-empty">Every rebate has been checked.</div>'}</div>
-    </section>` : '';
-
-  const msCard = (g) => `<section class="card work-card">
-      <div class="card-head"><h2><span class="ms-dot" style="background:${esc(g.color)}"></span>${esc(g.name)} <span class="work-n">${g.in_progress.length + g.up_next.length}</span></h2>
-        <a class="small" href="#/pipeline?milestone_id=${g.id}&ms_status=todo">See in Pipeline ›</a></div>
+          <span class="work-meta">${rebateStatusBadge(r.status)}</span><span class="work-chev">›</span></button>`).join('') || '<div class="work-empty">Every rebate has been checked.</div>'}</div>`],
+    sites: () => [mine.sites.length, `<div class="work-list">${mine.sites.map((p) => `<a class="work-row ${isFlagged(p) ? 'late' : ''}" href="#/projects/${p.id}">${workSite(p)}
+        <span class="work-meta">${p.phase === 'diligence' ? phaseBadge() : msStrip(p, { names: false })}</span><span class="work-chev">›</span></a>`).join('') || '<div class="work-empty">No sites assigned.</div>'}</div>`],
+    kpis: () => [null, `<div class="kpis in-widget">
+      <a class="kpi" href="#/diligence?tab=new"><div class="l">To assess</div><div class="v">${num(t.to_assess)} <span class="small muted">${num(t.to_review)} for review</span></div></a>
+      <a class="kpi" href="#/pipeline"><div class="l">In progress</div><div class="v">${num(t.open_projects)}</div></a>
+      <div class="kpi"><div class="l">Pipeline value</div><div class="v">${money(t.pipeline_value)}</div></div>
+      <div class="kpi"><div class="l">Ports in pipeline</div><div class="v">${num(t.pipeline_chargers)}</div></div>
+      <div class="kpi"><div class="l">Live</div><div class="v">${num(t.live_projects)} <span class="small muted">${num(t.live_chargers)} ports</span></div></div>
+      <div class="kpi"><div class="l">Open tickets</div><div class="v">${num(t.open_tickets)} ${t.overdue_tickets ? `<span class="small stale">${t.overdue_tickets} overdue</span>` : ''}</div></div></div>`],
+    ms_chart: () => [null, `<div class="funnel">${d.milestones.map((m) => {
+        const w = (n) => `${(n / total) * 100}%`;
+        return `<div class="funnel-row ms-funnel" data-mid="${m.id}" title="Projects still needing ${esc(m.name)}">
+          <div><span class="dot" style="background:${esc(m.color)}"></span> ${esc(m.name)}</div>
+          <div class="bar-track stack"><div class="seg-done" style="width:${w(m.done)}">${m.done || ''}</div><div class="seg-prog" style="width:${w(m.in_progress)}">${m.in_progress || ''}</div><div class="seg-todo" style="width:${w(m.not_started)}">${m.not_started || ''}</div></div>
+          <div class="small" style="text-align:right">${m.overdue ? `<span class="stale">${m.overdue} late</span>` : `<span class="muted">${m.not_needed ? `${m.not_needed} n/a` : ''}</span>`}</div></div>`;
+      }).join('')}</div>
+      <div class="legend small muted"><span><i class="seg-done"></i>Done</span><span><i class="seg-prog"></i>In progress</span><span><i class="seg-todo"></i>Not started</span></div>`],
+    attention: () => [d.stalled.length, d.stalled.length ? `<div class="work-list">${d.stalled.map((p) => `<a class="work-row late" href="#/projects/${p.id}">${workSite(p)}
+        <span class="work-meta"><span class="stale">${p.milestones.map((x, i) => (x.overdue ? `${esc(S.meta.milestones[i].name)} ${x.days_open}d` : '')).filter(Boolean).join(' · ') || esc(label(p.status))}</span>
+          <span class="muted">${esc(p.owner_name || '')}</span></span><span class="work-chev">›</span></a>`).join('')}</div>` : '<div class="work-empty">Nothing stalled.</div>'],
+    reminders: () => [mine.reminders.filter((r) => r.due_on <= today()).length || null, `<div class="rem-list ${own ? '' : 'readonly'}">${mine.reminders.slice(0, 12).map((r) => reminderLine(r, { showSite: true })).join('') || '<div class="work-empty">No follow-ups.</div>'}</div>`],
+    tickets: () => [d.myTickets.length, d.myTickets.length ? `<div class="feed">${d.myTickets.map((x) => `<div class="feed-item"><a href="#/tickets/${x.id}"><b>#${x.id} ${esc(x.title)}</b></a>
+        <div class="muted small">${esc(x.code)} · ${esc(x.project_name)}</div>
+        <div style="margin-top:4px;display:flex;gap:6px;flex-wrap:wrap">${ticketBadge(x.status)} ${prioBadge(x.priority)} ${x.due_date ? `<span class="small ${x.due_date < today() ? 'stale' : 'muted'}">due ${fdate(x.due_date)}</span>` : ''}</div></div>`).join('')}</div>` : '<div class="work-empty">No open tickets.</div>'],
+    activity: () => [null, `<div class="feed">${d.recent.map(activityItem).join('') || '<div class="work-empty">No activity yet.</div>'}</div>`],
+  };
+  const msWidget = (mid) => {
+    const g = mine.milestones.find((x) => String(x.id) === String(mid));
+    if (!g) return [null, '<div class="work-empty">This milestone no longer exists.</div>'];
+    return [g.in_progress.length + g.up_next.length, `${mine.scoped.length ? `<div class="muted small" style="margin:-4px 0 6px">${esc(mine.scoped.join(', '))}</div>` : ''}
       <div class="work-sub">In progress <span class="muted">${g.in_progress.length}</span></div>
       <div class="work-list">${g.in_progress.map((p) => `<a class="work-row ${p.ms.overdue ? 'late' : ''}" href="#/projects/${p.id}/m/${g.id}">${workSite(p)}
           <span class="work-meta"><span class="ms-progress"><span style="width:${p.ms.steps_total ? Math.round((p.ms.steps_done / p.ms.steps_total) * 100) : 0}%"></span></span>
@@ -900,83 +955,70 @@ async function renderDashboard(asId) {
       <div class="work-sub">Up next <span class="muted">${g.up_next.length}</span></div>
       <div class="work-list">${g.up_next.map((p) => `<a class="work-row" href="#/projects/${p.id}/m/${g.id}">${workSite(p)}
           <span class="work-meta">${p.prev ? `${esc(p.prev.name)} ${p.prev.status === 'done' ? `done ${fdate(p.prev.completed_at)}` : 'not needed'}` : 'Ready to start'}${p.status !== 'active' ? ` · ${esc(label(p.status))}` : ''}</span>
-          <span class="work-chev">›</span></a>`).join('') || '<div class="work-empty">Nothing waiting to start.</div>'}</div>
-    </section>`;
+          <span class="work-chev">›</span></a>`).join('') || '<div class="work-empty">Nothing waiting to start.</div>'}</div>`];
+  };
+  const widget = (id, col, i, len) => {
+    const [count, body] = id.startsWith('ms:') ? msWidget(id.slice(3)) : W[id]();
+    const meta = WIDGETS[id] || { link: `#/pipeline?milestone_id=${id.slice(3)}&ms_status=todo`, linkText: 'See in Pipeline' };
+    const m = id.startsWith('ms:') ? msById(id.slice(3)) : null;
+    const title = id === 'sites' && !own ? `${first}'s sites` : id === 'reminders' && own ? 'My reminders' : widgetName(id);
+    return `<section class="card widget" data-w="${esc(id)}">
+      <div class="card-head"><h2>${m ? `<span class="ms-dot" style="background:${esc(m.color)}"></span>` : ''}${esc(title)}${count != null ? ` <span class="work-n ${id === 'reminders' || id === 'attention' ? 'warn' : ''}">${count}</span>` : ''}</h2>
+        ${dashEdit ? `<span class="w-tools">
+            <button type="button" data-wmove="-1" data-col="${col}" data-i="${i}" ${i === 0 ? 'disabled' : ''} title="Move up" aria-label="Move up">↑</button>
+            <button type="button" data-wmove="1" data-col="${col}" data-i="${i}" ${i === len - 1 ? 'disabled' : ''} title="Move down" aria-label="Move down">↓</button>
+            <button type="button" data-wswap data-col="${col}" data-i="${i}" title="Move to the ${col === 'main' ? 'right' : 'left'} column">${col === 'main' ? '→' : '←'}</button>
+            <button type="button" data-whide data-col="${col}" data-i="${i}" title="Remove from my dashboard" aria-label="Remove">✕</button></span>`
+          : meta.link ? `<a class="small" href="${meta.link}">${esc(meta.linkText)} ›</a>` : ''}</div>
+      ${body}</section>`;
+  };
+  const column = (col) => layout[col].map((id, i) => widget(id, col, i, layout[col].length)).join('')
+    || `<div class="card work-empty">${dashEdit ? 'Empty column. Add a widget below.' : ''}</div>`;
+  const hidden = widgetIds().filter((id) => !layout.main.includes(id) && !layout.side.includes(id));
+  const people = S.meta.users.filter((u) => u.active).sort((a, b) => titleRank(a.title) - titleRank(b.title) || a.name.localeCompare(b.name));
 
-  const overview = `<div class="kpis">
-      <a class="card kpi" href="#/diligence?tab=new"><div class="l">To assess</div><div class="v">${num(t.to_assess)} <span class="small muted">${num(t.to_review)} for 10:30 review</span></div></a>
-      <a class="card kpi" href="#/pipeline"><div class="l">Projects in progress</div><div class="v">${num(t.open_projects)}</div></a>
-      <div class="card kpi"><div class="l">Pipeline value</div><div class="v">${money(t.pipeline_value)}</div></div>
-      <div class="card kpi"><div class="l">Ports in pipeline</div><div class="v">${num(t.pipeline_chargers)}</div></div>
-      <div class="card kpi"><div class="l">Live</div><div class="v">${num(t.live_projects)} <span class="small muted">${num(t.live_chargers)} ports</span></div></div>
-      <div class="card kpi"><div class="l">Open tickets</div><div class="v">${num(t.open_tickets)} ${t.overdue_tickets ? `<span class="small stale">${t.overdue_tickets} overdue</span>` : ''}</div></div>
-    </div>
-    <div class="card"><h2>Milestones across open projects</h2>
-      <div class="funnel">${d.milestones.map((m) => {
-        const w = (n) => `${(n / total) * 100}%`;
-        return `<div class="funnel-row ms-funnel" data-mid="${m.id}" title="Projects still needing ${esc(m.name)}">
-          <div><span class="dot" style="background:${esc(m.color)}"></span> ${esc(m.name)}</div>
-          <div class="bar-track stack"><div class="seg-done" style="width:${w(m.done)}">${m.done || ''}</div><div class="seg-prog" style="width:${w(m.in_progress)}">${m.in_progress || ''}</div><div class="seg-todo" style="width:${w(m.not_started)}">${m.not_started || ''}</div></div>
-          <div class="small" style="text-align:right">${m.overdue ? `<span class="stale">${m.overdue} late</span>` : `<span class="muted">${m.not_needed ? `${m.not_needed} n/a` : ''}</span>`}</div></div>`;
-      }).join('')}</div>
-      <div class="legend small muted"><span><i class="seg-done"></i>Done</span><span><i class="seg-prog"></i>In progress</span><span><i class="seg-todo"></i>Not started</span></div>
-    </div>
-    <div class="card" style="margin-top:16px"><h2>Needs attention <span class="muted small">— running late, on hold or blocked</span></h2>
-      ${d.stalled.length ? `<div class="table-wrap" style="box-shadow:none"><table><thead><tr><th>Project</th><th>Milestones</th><th>Status</th><th>Owner</th></tr></thead><tbody>
-      ${d.stalled.map((p) => `<tr class="clickable" data-href="#/projects/${p.id}">
-        <td><b>${esc(p.address || p.name)}</b><div class="muted small">${esc(p.code)} · ${esc(p.name)}</div></td>
-        <td>${msStrip(p, { names: false })}<div class="small stale">${p.milestones.map((x, i) => (x.overdue ? `${esc(S.meta.milestones[i].name)} ${x.days_open}d` : '')).filter(Boolean).join(' · ')}</div></td>
-        <td>${statusBadge(p.status)}${p.hold_reason ? `<div class="muted small">${esc(p.hold_reason)}</div>` : ''}</td>
-        <td>${esc(p.owner_name || '—')}</td></tr>`).join('')}</tbody></table></div>` : '<div class="empty">Nothing stalled.</div>'}
-    </div>`;
-
-  let showOverview = !hasDuties;
-  try { const v = localStorage.getItem('evium.dash.overview'); if (v !== null && hasDuties) showOverview = v === '1'; } catch { /* storage unavailable */ }
   view.innerHTML = `
-    <div class="page-head"><div>${other ? `<div class="muted small"><a href="#/team">Team</a> / ${esc(other.name)}</div>` : ''}
-        <h1>${other ? `${esc(other.name.split(' ')[0])}'s work` : `${greeting()}, ${esc(S.me.name.split(' ')[0])}`}</h1>
-        <div class="muted small" style="margin-top:4px">${other ? `${esc(other.title || label(other.role))}${mine.scoped.length ? ` · ${esc(mine.scoped.join(', '))}` : ''}${hasDuties ? '' : ' · no duties set yet'}`
-          : hasDuties ? `Your work${mine.scoped.length && mine.milestones.length ? ` · milestones in ${esc(mine.scoped.join(', '))}` : ''}` : 'Pick what you\'re responsible for to see your own work list here.'}</div></div>
-      <div class="actions">${other ? '<a class="btn" href="#/team">‹ Back to Team</a>' : '<button class="btn" id="customize">Customize</button>'}<button class="btn primary" id="newProject">+ New property</button></div></div>
-    <div class="cols-main">
-      <div class="grid" style="gap:16px">
-        ${!hasDuties && !other && canSeeTeam() ? `<a class="card work-setup team-cta" href="#/team"><h2>Team</h2>
-          <p class="muted" style="margin:0">See what everyone is working on, who's running late, and open anyone's dashboard ›</p></a>` : ''}
-        ${hasDuties || other || canSeeTeam() ? '' : `<div class="card work-setup"><h2>Make this dashboard yours</h2>
-          <p class="muted">Tell the CRM what you handle, like assessing due diligence sites, proposals and contracts, or site walks, and this page will list exactly what's waiting for you.</p>
-          <button class="btn primary" id="customize2">Choose what I'm responsible for</button></div>`}
-        ${ddCard}${reviewCard}${grantsCard}${mine.milestones.map(msCard).join('')}
-        <details class="overview" ${showOverview ? 'open' : ''}><summary>Company overview</summary><div class="overview-body">${overview}</div></details>
-      </div>
-      <div class="grid" style="gap:16px">
-        <div class="card" id="myReminders"></div>
-        <div class="card"><h2>${other ? 'Open tickets' : 'My open tickets'}</h2>
-          ${d.myTickets.length ? `<div class="feed">${d.myTickets.map((x) => `<div class="feed-item"><a href="#/tickets/${x.id}"><b>#${x.id} ${esc(x.title)}</b></a>
-            <div class="muted small">${esc(x.code)} · ${esc(x.project_name)}</div>
-            <div style="margin-top:4px;display:flex;gap:6px;flex-wrap:wrap">${ticketBadge(x.status)} ${prioBadge(x.priority)} ${x.due_date ? `<span class="small ${x.due_date < today() ? 'stale' : 'muted'}">due ${fdate(x.due_date)}</span>` : ''}</div></div>`).join('')}</div>`
-          : `<div class="empty">No tickets assigned${other ? '' : ' to you'}.</div>`}
-        </div>
-        <div class="card"><h2>Recent activity</h2><div class="feed">${d.recent.map(activityItem).join('') || '<div class="empty">No activity yet.</div>'}</div></div>
-      </div>
+    <div class="page-head dash-head"><div>
+        <h1>${own ? `${greeting()}, ${esc(first)}` : `${esc(first)}'s dashboard`}</h1>
+        <div class="muted small" style="margin-top:4px">${esc(who.title || label(who.role))}${who.states ? ` · ${esc(who.states.replace(/,/g, ', '))}` : ''}${own ? '' : ' · view only'}</div></div>
+      <div class="actions">
+        <label class="view-as">Viewing<select id="viewAs">${people.map((u) => `<option value="${u.id}" ${u.id === who.id ? 'selected' : ''}>${u.id === S.me.id ? 'My dashboard' : `${esc(u.name)}${u.title ? ` · ${esc(u.title)}` : ''}`}</option>`).join('')}</select></label>
+        ${own ? `<button class="btn ${dashEdit ? 'primary' : ''}" id="customize">${dashEdit ? 'Done' : 'Customize'}</button>` : `<button class="btn" id="backMine">Back to mine</button>`}
+        ${dashEdit ? '' : '<button class="btn primary" id="newProject">+ New property</button>'}
+      </div></div>
+    ${dashEdit ? `<div class="card dash-edit">
+        <div><b>Customize your dashboard.</b> <span class="muted small">Use the arrows to move widgets, → / ← to switch columns, ✕ to remove. Changes save as you go.</span></div>
+        <div class="dash-edit-row">
+          <select id="addWidget"${hidden.length ? '' : ' disabled'}>${hidden.length ? hidden.map((id) => `<option value="${esc(id)}">${esc(widgetName(id))}${id.startsWith('ms:') ? ' (milestone)' : ''}</option>`).join('') : '<option>Every widget is on your dashboard</option>'}</select>
+          <button class="btn sm" id="addWidgetBtn" ${hidden.length ? '' : 'disabled'}>Add widget</button>
+          <span class="dash-edit-spacer"></span>
+          <button class="btn sm" id="editDuties">What I'm responsible for</button>
+          <button class="btn sm" id="resetLayout">Reset to default</button>
+        </div></div>` : ''}
+    <div class="cols-main ${dashEdit ? 'editing' : ''}">
+      <div class="grid" style="gap:16px">${column('main')}</div>
+      <div class="grid" style="gap:16px">${column('side')}</div>
     </div>`;
-  $('#newProject').onclick = () => projectForm();
-  $('#customize')?.addEventListener('click', () => dutiesModal());
-  $('#customize2')?.addEventListener('click', () => dutiesModal());
-  $('details.overview').addEventListener('toggle', (e) => { try { localStorage.setItem('evium.dash.overview', e.target.open ? '1' : '0'); } catch { /* ignore */ } });
+
+  // ---- interactions ----
+  const save = async (l) => {
+    try { const r = await api('PUT', '/api/me/dashboard', l); S.meta.users.find((u) => u.id === S.me.id).dashboard = r.layout; renderDashboard(); } catch (err) { fail(err); }
+  };
+  $('#viewAs').onchange = (e) => { dashEdit = false; location.hash = Number(e.target.value) === S.me.id ? '#/dashboard' : `#/dashboard?as=${e.target.value}`; };
+  $('#backMine')?.addEventListener('click', () => { location.hash = '#/dashboard'; });
+  $('#customize')?.addEventListener('click', () => { dashEdit = !dashEdit; renderDashboard(); });
+  $('#newProject')?.addEventListener('click', () => projectForm());
+  $('#editDuties')?.addEventListener('click', () => dutiesModal());
+  $('#resetLayout')?.addEventListener('click', () => { if (confirm('Go back to the default dashboard for your job?')) save({}); });
+  $('#addWidgetBtn')?.addEventListener('click', () => { const id = $('#addWidget').value; const l = { main: [...layout.main], side: [...layout.side] }; (WIDGETS[id] && ['reminders', 'tickets', 'activity'].includes(id) ? l.side : l.main).push(id); save(l); });
+  const edit = (fn) => (b) => (b.onclick = () => { const l = { main: [...layout.main], side: [...layout.side] }; fn(l, b.dataset.col, Number(b.dataset.i), b); save(l); });
+  $$('[data-wmove]', view).forEach(edit((l, col, i, b) => { const j = i + Number(b.dataset.wmove); [l[col][i], l[col][j]] = [l[col][j], l[col][i]]; }));
+  $$('[data-wswap]', view).forEach(edit((l, col, i) => { const [id] = l[col].splice(i, 1); l[col === 'main' ? 'side' : 'main'].push(id); }));
+  $$('[data-whide]', view).forEach(edit((l, col, i) => { l[col].splice(i, 1); }));
   $$('.ms-funnel', view).forEach((r) => (r.onclick = () => (location.hash = `#/pipeline?milestone_id=${r.dataset.mid}&ms_status=todo`)));
   $$('[data-assess]', view).forEach((b) => (b.onclick = () => assessModal(mine.dd.find((p) => String(p.id) === b.dataset.assess), () => renderDashboard(asId))));
   bindRebateChips();
-  bindRowLinks();
-  const drawRem = async () => {
-    const el = $('#myReminders'); if (!el) return;
-    if (other) { el.remove(); return; }
-    const rows = await api('GET', '/api/reminders');
-    const due = rows.filter((r) => r.due_on <= today());
-    el.innerHTML = `<h2>My reminders ${due.length ? `<span class="small stale">${due.length} due</span>` : ''}</h2>
-      <div class="rem-list">${rows.slice(0, 12).map((r) => reminderLine(r, { showSite: true })).join('') || '<div class="empty">No follow-ups.</div>'}</div>`;
-    bindReminderLines(el, drawRem);
-  };
-  drawRem().catch(() => {});
+  if (own) bindReminderLines(view, () => renderDashboard());
 }
 
 // the checkboxes that say what someone is responsible for (used on the dashboard and in Admin)
@@ -1001,7 +1043,7 @@ function dutiesModal() {
     try {
       const u = await api('PATCH', '/api/me/duties', readDuties(formData(e.target)));
       Object.assign(S.me, { dd_assessor: u.dd_assessor, milestone_ids: u.milestone_ids, grants: u.grants });
-      await loadMeta(); modalClose = null; closeModal(); toast('Dashboard updated'); renderDashboard();
+      await loadMeta(); modalClose = null; closeModal(); toast('Saved'); renderDashboard();
     } catch (err) { fail(err); }
   });
 }

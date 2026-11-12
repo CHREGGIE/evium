@@ -393,6 +393,8 @@ addColumns('users', { dd_assessor: 'INTEGER NOT NULL DEFAULT 0', milestone_ids: 
 // title = job title shown around the app; is_exec = can see the Team page and anyone's dashboard;
 // grants = grants manager (owns the rebate board, pinged when a site picks a rebate)
 addColumns('users', { title: 'TEXT', is_exec: 'INTEGER NOT NULL DEFAULT 0', grants: 'INTEGER NOT NULL DEFAULT 0' });
+// each person's own dashboard layout: {"main": [widget ids], "side": [widget ids]} (empty = default for their job)
+addColumns('users', { dashboard: 'TEXT' });
 
 // ---------- milestone steps ----------
 // Each milestone has a default checklist of steps (edited in Admin). A project gets its own copy

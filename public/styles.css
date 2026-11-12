@@ -501,3 +501,23 @@ details.overview > summary { cursor: pointer; font-weight: 700; font-size: 15px;
   .team-work, .team-stats { grid-column: 2; text-align: left; }
 }
 .team-cta { display: block; color: var(--ink); } .team-cta:hover { text-decoration: none; border-color: var(--brand); }
+
+/* customizable dashboard */
+.dash-head .actions { align-items: center; }
+.view-as { display: flex; flex-direction: row; align-items: center; gap: 8px; font-size: 13px; font-weight: 600; color: var(--muted); }
+.view-as select { width: auto; min-width: 200px; }
+.dash-edit { display: grid; gap: 10px; margin-bottom: 16px; border: 1px dashed var(--brand); background: #f0fdf4; }
+.dash-edit-row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.dash-edit-row select { width: auto; min-width: 240px; }
+.dash-edit-spacer { flex: 1; }
+.cols-main.editing .widget { outline: 2px dashed #cbd5e1; outline-offset: -2px; }
+.w-tools { display: flex; gap: 4px; }
+.w-tools button { border: 1px solid var(--line); background: #fff; border-radius: 6px; width: 30px; height: 28px; cursor: pointer; font: inherit; color: #334155; }
+.w-tools button:hover:not(:disabled) { border-color: #94a3b8; }
+.w-tools button:disabled { opacity: .35; cursor: default; }
+.w-tools button[data-whide]:hover { color: var(--danger); border-color: var(--danger); }
+.kpis.in-widget { margin: 0; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); }
+.kpis.in-widget .kpi { background: #f8fafc; border-radius: 10px; padding: 12px; color: inherit; }
+.kpis.in-widget a.kpi:hover { text-decoration: none; background: #f1f5f9; }
+.work-n.warn { background: #fee2e2; color: #991b1b; }
+.rem-list.readonly .rem-actions { display: none; }
