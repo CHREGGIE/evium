@@ -144,8 +144,9 @@ async function boot() {
   await loadMeta();
   $('#login').classList.add('hidden');
   $('#shell').classList.remove('hidden');
-  $('#meName').textContent = `${S.me.name}${S.me.role === 'admin' ? ' · admin' : ''}`;
+  $('#meName').textContent = `${S.me.name}${S.me.title ? ` · ${S.me.title}` : S.me.role === 'admin' ? ' · admin' : ''}`;
   $$('.admin-only').forEach((el) => el.classList.toggle('hidden', S.me.role !== 'admin'));
+  $$('.team-only').forEach((el) => el.classList.toggle('hidden', !canSeeTeam()));
   startBell();
   route();
 }
@@ -167,6 +168,7 @@ async function route() {
     else if (page === 'diligence') await renderDiligence();
     else if (page === 'pipeline') await renderPipeline();
     else if (page === 'map') await renderMap();
+    else if (page === 'team' && canSeeTeam()) { if (id) await renderDashboard(id); else await renderTeam(); }
     else if (page === 'rebates') await renderRebates();
     else if (page === 'utilities' && id) await renderUtility(id);
     else if (page === 'utilities') await renderUtilities();
@@ -189,7 +191,7 @@ const territoryToggle = (on) => (myStates().length
   ? `<button type="button" class="chip ${on ? 'active' : ''}" id="mineToggle" title="Only show ${esc(myStates().join(', '))}">★ My territory</button>` : '');
 
 // ---------- notifications ----------
-const NOTIF_ICON = { handoff: '→', site_walk: '→', review: '?', mention: '@', message: '💬', reminder: '⏰', reminder_set: '⏰', territory: '★' };
+const NOTIF_ICON = { rebate: '$', handoff: '→', site_walk: '→', review: '?', mention: '@', message: '💬', reminder: '⏰', reminder_set: '⏰', territory: '★' };
 let bellTimer = null;
 async function refreshBell() {
   if (!S.me) return;
@@ -333,7 +335,7 @@ function docUploadModal(projectId, milestoneId, missing, retry, { onCancel } = {
 }
 
 // ---------- rebate board ----------
-const CORE_STATES = ['NY', 'NJ', 'TX', 'CA', 'CT', 'IL'];
+const CORE_STATES = ['NY', 'NJ', 'CT', 'PA', 'RI', 'MA', 'TX', 'AR', 'FL', 'IL', 'GA', 'NM', 'OH'];
 const REBATE_KIND = { rebate: 'Rebate', grant: 'Grant', make_ready: 'Make-ready program', tax_credit: 'Tax credit' };
 const REBATE_STATUS = { open: 'Open', upcoming: 'Opening soon', waitlist: 'Waitlist', closed: 'Closed' };
 const regionName = (code) => (code === 'US' ? 'Federal (all states)' : stateName(code));
@@ -808,15 +810,57 @@ async function renderMilestone(pid, mid) {
   mountChat($('#msChat'), p, m.id).catch(() => {});
 }
 
+// ---------- team (executives and admins) ----------
+const canSeeTeam = () => S.me.role === 'admin' || !!S.me.is_exec;
+// job titles, and the duties each one usually comes with (ticked automatically when picking a title in Admin)
+const TITLE_ORDER = ['CEO', 'Executive', 'Account manager', 'Senior project manager', 'Project manager', 'Grants manager'];
+const PM_MILESTONES = ['Site walk & proposal', 'Permitting', 'Approvals', 'Installation'];
+const TITLE_PRESETS = {
+  'CEO': { role: 'admin', is_exec: true },
+  'Executive': { is_exec: true, can_review: true },
+  'Account manager': { dd_assessor: true, milestones: ['Send proposal', 'Contract'] },
+  'Senior project manager': { milestones: PM_MILESTONES },
+  'Project manager': { milestones: PM_MILESTONES },
+  'Grants manager': { grants: true },
+};
+const titleRank = (t) => { const i = TITLE_ORDER.indexOf(t); return i < 0 ? 99 : i; };
+
+async function renderTeam() {
+  const people = (await api('GET', '/api/team')).sort((a, b) => titleRank(a.title) - titleRank(b.title) || a.name.localeCompare(b.name));
+  const totalLate = people.reduce((a, p) => a + p.late, 0);
+  const work = (p) => {
+    const bits = [];
+    if (p.dd_to_assess != null) bits.push(`<span class="tw"><b>${p.dd_to_assess}</b> to assess</span>`);
+    if (p.review != null) bits.push(`<span class="tw"><b>${p.review}</b> for 10:30 review</span>`);
+    if (p.grants_check != null) bits.push(`<span class="tw"><b>${p.grants_check}</b> rebates to check</span><span class="tw"><b>${p.grants_no_rebate}</b> sites with no rebate</span>`);
+    p.milestones.forEach((g) => bits.push(`<span class="tw ${g.late ? 'late' : ''}" title="${esc(g.name)}"><span class="dot" style="background:${esc(g.color)}"></span>${esc(g.name)} <b>${g.in_progress}</b>${g.up_next ? ` <span class="muted">+${g.up_next} next</span>` : ''}${g.late ? ` <span class="stale">${g.late} late</span>` : ''}</span>`));
+    return bits.join('') || '<span class="muted small">No duties set</span>';
+  };
+  view.innerHTML = `
+    <div class="page-head"><div><h1>Team</h1><div class="muted small" style="margin-top:4px">Everyone's work right now${totalLate ? ` · <span class="stale">${totalLate} milestone${totalLate === 1 ? '' : 's'} running late</span>` : ''}. Click a person to see their dashboard.</div></div></div>
+    <div class="team-list">${people.map((p) => `<a class="team-row ${p.late ? 'has-late' : ''}" href="#/team/${p.id}">
+        <span class="avatar big">${esc(initials(p.name))}</span>
+        <span class="team-who"><b>${esc(p.name)}</b><span class="muted small">${esc(p.title || label(p.role))}${p.states ? ` · ${esc(p.states.replace(/,/g, ', '))}` : ''}</span></span>
+        <span class="team-work">${work(p)}</span>
+        <span class="team-stats small">
+          <span title="Sites they own"><b>${p.sites}</b> sites</span>
+          <span title="Open tickets"><b>${p.tickets}</b> tickets</span>
+          ${p.reminders_due ? `<span class="stale" title="Reminders due"><b>${p.reminders_due}</b> due</span>` : ''}
+          <span class="muted" title="Last activity">${p.last_active ? `active ${ago(p.last_active)}` : 'no activity yet'}</span>
+        </span>
+        <span class="work-chev">›</span></a>`).join('')}</div>`;
+}
+
 // ---------- dashboard: your own work first, the company overview below ----------
 const myMilestoneIds = (u = S.me) => String(u?.milestone_ids || '').split(',').map(Number).filter(Boolean);
 const greeting = () => { const h = new Date().getHours(); return h < 12 ? 'Good morning' : h < 17 ? 'Good afternoon' : 'Good evening'; };
 const workSite = (p) => `<span class="work-site"><b>${esc(p.address || p.name)}</b><span class="muted small">${esc([[p.city, p.state].filter(Boolean).join(', '), p.address ? p.name : '', p.code].filter(Boolean).join(' · '))}</span></span>`;
 
-async function renderDashboard() {
-  const d = await api('GET', '/api/dashboard');
+async function renderDashboard(asId) {
+  const d = await api('GET', `/api/dashboard${asId ? `?as=${asId}` : ''}`);
   const t = d.totals; const mine = d.mine;
-  const hasDuties = !!(mine.dd || mine.review || mine.milestones.length);
+  const other = asId && Number(asId) !== S.me.id ? S.meta.users.find((u) => u.id === Number(asId)) : null;
+  const hasDuties = !!(mine.dd || mine.review || mine.grants || mine.milestones.length);
   const total = Math.max(1, ...d.milestones.map((m) => m.done + m.in_progress + m.not_started));
 
   const ddCard = mine.dd ? `<section class="card work-card">
@@ -832,6 +876,18 @@ async function renderDashboard() {
       <div class="card-head"><h2>10:30 review <span class="work-n">${mine.review.length}</span></h2><a class="small" href="#/diligence?tab=review">Start the review ›</a></div>
       <div class="work-list">${mine.review.map((p) => `<a class="work-row" href="#/diligence?tab=review">${workSite(p)}<span class="work-meta">${ratingView(p.dd_rating)}</span><span class="work-chev">›</span></a>`).join('')
         || '<div class="work-empty">Nothing waiting for review.</div>'}</div></section>` : '';
+
+  const grantsCard = mine.grants ? `<section class="card work-card">
+      <div class="card-head"><h2>Rebates <span class="work-n">${mine.grants.needs_check.length + mine.grants.deadlines.length + mine.grants.no_rebate.length}</span></h2><a class="small" href="#/rebates">Open the Rebates board ›</a></div>
+      <div class="work-sub">Deadlines in the next 60 days <span class="muted">${mine.grants.deadlines.length}</span></div>
+      <div class="work-list">${mine.grants.deadlines.map((r) => `<button type="button" class="work-row as-btn" data-rebate="${r.id}"><span class="work-site"><b>${esc(r.name)}</b><span class="muted small">${esc(regionName(r.state))}</span></span>
+          <span class="work-meta"><span class="${daysUntil(r.deadline) <= 14 ? 'stale' : ''}">${esc(deadlineText(r.deadline))}</span></span><span class="work-chev">›</span></button>`).join('') || '<div class="work-empty">No deadlines coming up.</div>'}</div>
+      <div class="work-sub">Sites with no rebate yet <span class="muted">${mine.grants.no_rebate.length}</span></div>
+      <div class="work-list">${mine.grants.no_rebate.map((p) => `<a class="work-row" href="#/projects/${p.id}">${workSite(p)}<span class="work-meta">${p.phase === 'diligence' ? 'Due diligence' : 'Pipeline'}</span><span class="work-chev">›</span></a>`).join('') || '<div class="work-empty">Every site has a rebate picked.</div>'}</div>
+      <div class="work-sub">Needs checking <span class="muted">${mine.grants.needs_check.length}</span></div>
+      <div class="work-list">${mine.grants.needs_check.map((r) => `<button type="button" class="work-row as-btn" data-rebate="${r.id}"><span class="work-site"><b>${esc(r.name)}</b><span class="muted small">${esc(regionName(r.state))} · ${esc(REBATE_KIND[r.kind])}</span></span>
+          <span class="work-meta">${rebateStatusBadge(r.status)}</span><span class="work-chev">›</span></button>`).join('') || '<div class="work-empty">Every rebate has been checked.</div>'}</div>
+    </section>` : '';
 
   const msCard = (g) => `<section class="card work-card">
       <div class="card-head"><h2><span class="ms-dot" style="background:${esc(g.color)}"></span>${esc(g.name)} <span class="work-n">${g.in_progress.length + g.up_next.length}</span></h2>
@@ -877,37 +933,43 @@ async function renderDashboard() {
   let showOverview = !hasDuties;
   try { const v = localStorage.getItem('evium.dash.overview'); if (v !== null && hasDuties) showOverview = v === '1'; } catch { /* storage unavailable */ }
   view.innerHTML = `
-    <div class="page-head"><div><h1>${greeting()}, ${esc(S.me.name.split(' ')[0])}</h1>
-        <div class="muted small" style="margin-top:4px">${hasDuties ? `Your work${mine.scoped.length && mine.milestones.length ? ` · milestones in ${esc(mine.scoped.join(', '))}` : ''}` : 'Pick what you\'re responsible for to see your own work list here.'}</div></div>
-      <div class="actions"><button class="btn" id="customize">Customize</button><button class="btn primary" id="newProject">+ New property</button></div></div>
+    <div class="page-head"><div>${other ? `<div class="muted small"><a href="#/team">Team</a> / ${esc(other.name)}</div>` : ''}
+        <h1>${other ? `${esc(other.name.split(' ')[0])}'s work` : `${greeting()}, ${esc(S.me.name.split(' ')[0])}`}</h1>
+        <div class="muted small" style="margin-top:4px">${other ? `${esc(other.title || label(other.role))}${mine.scoped.length ? ` · ${esc(mine.scoped.join(', '))}` : ''}${hasDuties ? '' : ' · no duties set yet'}`
+          : hasDuties ? `Your work${mine.scoped.length && mine.milestones.length ? ` · milestones in ${esc(mine.scoped.join(', '))}` : ''}` : 'Pick what you\'re responsible for to see your own work list here.'}</div></div>
+      <div class="actions">${other ? '<a class="btn" href="#/team">‹ Back to Team</a>' : '<button class="btn" id="customize">Customize</button>'}<button class="btn primary" id="newProject">+ New property</button></div></div>
     <div class="cols-main">
       <div class="grid" style="gap:16px">
-        ${hasDuties ? '' : `<div class="card work-setup"><h2>Make this dashboard yours</h2>
+        ${!hasDuties && !other && canSeeTeam() ? `<a class="card work-setup team-cta" href="#/team"><h2>Team</h2>
+          <p class="muted" style="margin:0">See what everyone is working on, who's running late, and open anyone's dashboard ›</p></a>` : ''}
+        ${hasDuties || other || canSeeTeam() ? '' : `<div class="card work-setup"><h2>Make this dashboard yours</h2>
           <p class="muted">Tell the CRM what you handle, like assessing due diligence sites, proposals and contracts, or site walks, and this page will list exactly what's waiting for you.</p>
           <button class="btn primary" id="customize2">Choose what I'm responsible for</button></div>`}
-        ${ddCard}${reviewCard}${mine.milestones.map(msCard).join('')}
+        ${ddCard}${reviewCard}${grantsCard}${mine.milestones.map(msCard).join('')}
         <details class="overview" ${showOverview ? 'open' : ''}><summary>Company overview</summary><div class="overview-body">${overview}</div></details>
       </div>
       <div class="grid" style="gap:16px">
         <div class="card" id="myReminders"></div>
-        <div class="card"><h2>My open tickets</h2>
+        <div class="card"><h2>${other ? 'Open tickets' : 'My open tickets'}</h2>
           ${d.myTickets.length ? `<div class="feed">${d.myTickets.map((x) => `<div class="feed-item"><a href="#/tickets/${x.id}"><b>#${x.id} ${esc(x.title)}</b></a>
             <div class="muted small">${esc(x.code)} · ${esc(x.project_name)}</div>
             <div style="margin-top:4px;display:flex;gap:6px;flex-wrap:wrap">${ticketBadge(x.status)} ${prioBadge(x.priority)} ${x.due_date ? `<span class="small ${x.due_date < today() ? 'stale' : 'muted'}">due ${fdate(x.due_date)}</span>` : ''}</div></div>`).join('')}</div>`
-          : '<div class="empty">No tickets assigned to you.</div>'}
+          : `<div class="empty">No tickets assigned${other ? '' : ' to you'}.</div>`}
         </div>
         <div class="card"><h2>Recent activity</h2><div class="feed">${d.recent.map(activityItem).join('') || '<div class="empty">No activity yet.</div>'}</div></div>
       </div>
     </div>`;
   $('#newProject').onclick = () => projectForm();
-  $('#customize').onclick = () => dutiesModal();
+  $('#customize')?.addEventListener('click', () => dutiesModal());
   $('#customize2')?.addEventListener('click', () => dutiesModal());
   $('details.overview').addEventListener('toggle', (e) => { try { localStorage.setItem('evium.dash.overview', e.target.open ? '1' : '0'); } catch { /* ignore */ } });
   $$('.ms-funnel', view).forEach((r) => (r.onclick = () => (location.hash = `#/pipeline?milestone_id=${r.dataset.mid}&ms_status=todo`)));
-  $$('[data-assess]', view).forEach((b) => (b.onclick = () => assessModal(mine.dd.find((p) => String(p.id) === b.dataset.assess), renderDashboard)));
+  $$('[data-assess]', view).forEach((b) => (b.onclick = () => assessModal(mine.dd.find((p) => String(p.id) === b.dataset.assess), () => renderDashboard(asId))));
+  bindRebateChips();
   bindRowLinks();
   const drawRem = async () => {
     const el = $('#myReminders'); if (!el) return;
+    if (other) { el.remove(); return; }
     const rows = await api('GET', '/api/reminders');
     const due = rows.filter((r) => r.due_on <= today());
     el.innerHTML = `<h2>My reminders ${due.length ? `<span class="small stale">${due.length} due</span>` : ''}</h2>
@@ -920,11 +982,12 @@ async function renderDashboard() {
 // the checkboxes that say what someone is responsible for (used on the dashboard and in Admin)
 const dutiesFields = (u) => `
   <label class="check-inline"><input type="checkbox" name="dd_assessor" ${u?.dd_assessor ? 'checked' : ''}> Assesses new due diligence sites (1–5 rating and insight)</label>
+  <label class="check-inline"><input type="checkbox" name="grants" ${u?.grants ? 'checked' : ''}> Grants manager: looks after the Rebates board and is told when a site picks a rebate</label>
   <fieldset class="checkset"><legend>Milestones they own</legend>
     ${S.meta.milestones.map((m) => `<label><input type="checkbox" name="ms_${m.id}" ${myMilestoneIds(u).includes(m.id) ? 'checked' : ''}> ${esc(m.name)}</label>`).join('')}</fieldset>`;
 const readDuties = (d) => {
-  const out = { dd_assessor: !!d.dd_assessor, milestone_ids: Object.keys(d).filter((k) => k.startsWith('ms_')).map((k) => Number(k.slice(3))) };
-  Object.keys(d).filter((k) => k.startsWith('ms_') || k === 'dd_assessor').forEach((k) => delete d[k]);
+  const out = { dd_assessor: !!d.dd_assessor, grants: !!d.grants, milestone_ids: Object.keys(d).filter((k) => k.startsWith('ms_')).map((k) => Number(k.slice(3))) };
+  Object.keys(d).filter((k) => k.startsWith('ms_') || k === 'dd_assessor' || k === 'grants').forEach((k) => delete d[k]);
   return out;
 };
 function dutiesModal() {
@@ -937,7 +1000,7 @@ function dutiesModal() {
     e.preventDefault();
     try {
       const u = await api('PATCH', '/api/me/duties', readDuties(formData(e.target)));
-      Object.assign(S.me, { dd_assessor: u.dd_assessor, milestone_ids: u.milestone_ids });
+      Object.assign(S.me, { dd_assessor: u.dd_assessor, milestone_ids: u.milestone_ids, grants: u.grants });
       await loadMeta(); modalClose = null; closeModal(); toast('Dashboard updated'); renderDashboard();
     } catch (err) { fail(err); }
   });
@@ -1820,7 +1883,7 @@ async function renderAdmin() {
       <div class="card"><div style="display:flex;justify-content:space-between;align-items:center"><h2>Staff users</h2><button class="btn primary sm" id="addUser">+ Add user</button></div>
         <p class="muted small">Only Evium staff sign in. Customers are stored as contacts on each project and never need an account.</p>
         <div class="table-wrap" style="box-shadow:none"><table><thead><tr><th>Name</th><th>Role</th><th>Territory</th><th>Status</th><th></th></tr></thead><tbody>
-        ${users.map((u) => `<tr><td><b>${esc(u.name)}</b><div class="muted small">${esc(u.email)}</div></td><td>${esc(label(u.role))}<div class="muted small">${esc([u.role !== 'admin' && u.can_review ? '10:30 reviewer' : '', u.dd_assessor ? 'Due diligence' : '',
+        ${users.sort((a, b) => titleRank(a.title) - titleRank(b.title) || a.name.localeCompare(b.name)).map((u) => `<tr><td><b>${esc(u.name)}</b><div class="muted small">${esc(u.title ? `${u.title} · ` : '')}${esc(u.email)}</div></td><td>${esc(label(u.role))}<div class="muted small">${esc([u.role !== 'admin' && u.can_review ? '10:30 reviewer' : '', u.dd_assessor ? 'Due diligence' : '',
           ...myMilestoneIds(u).map((id) => S.meta.milestones.find((m) => m.id === id)?.name).filter(Boolean)].filter(Boolean).join(' · '))}</div></td><td>${esc((u.states || '').replace(/,/g, ', ') || '—')}</td>
           <td>${u.active ? badge('s-active', 'Active') : badge('s-cancelled', 'Disabled')}</td>
           <td style="text-align:right"><button class="btn sm" data-edituser="${u.id}">Edit</button></td></tr>`).join('')}
@@ -1880,20 +1943,32 @@ function userForm(u = null) {
     <form class="form-grid">
       <label>Name<input name="name" required value="${esc(u?.name)}"></label>
       <label>Email<input name="email" type="email" required value="${esc(u?.email)}"></label>
-      <label>Role<select name="role">${options(['staff', 'admin'], u?.role || 'staff')}</select></label>
+      <label>Job title<input name="title" list="titleList" value="${esc(u?.title)}" placeholder="e.g. Project manager" autocomplete="off">
+        <datalist id="titleList">${TITLE_ORDER.map((t) => `<option value="${esc(t)}">`).join('')}</datalist></label>
+      <label>Access<select name="role">${options([['staff', 'Staff'], ['admin', 'Admin (manage users and settings)']], u?.role || 'staff')}</select></label>
       ${u ? `<label>Status<select name="active">${options([['1', 'Active'], ['0', 'Disabled']], u.active ? '1' : '0')}</select></label>` : ''}
       <label class="full">${u ? 'Reset password (leave blank to keep)' : 'Temporary password (min 8)'}<input name="password" type="text" ${u ? '' : 'required'} minlength="8" autocomplete="off"></label>
+      <label class="full check-inline"><input type="checkbox" name="is_exec" ${u?.is_exec ? 'checked' : ''}> Executive: sees the Team page and can open anyone's dashboard</label>
       <label class="full check-inline"><input type="checkbox" name="can_review" ${u?.can_review ? 'checked' : ''}> Runs the 10:30 due diligence review (can approve or pass sites; admins always can)</label>
       <div class="full grid" style="gap:8px">${dutiesFields(u)}</div>
       <fieldset class="checkset full"><legend>Territory: the states they cover. Their milestone work and pings are limited to these (none = every state)</legend>
         ${[...new Set([...CORE_STATES, ...S.meta.statesInUse, ...String(u?.states || '').split(',').filter(Boolean)])].map((st) => `<label><input type="checkbox" name="st_${st}" ${String(u?.states || '').split(',').includes(st) ? 'checked' : ''}> ${st}</label>`).join('')}</fieldset>
       <div class="modal-foot full"><button type="button" class="btn" data-close>Cancel</button><button class="btn primary">${u ? 'Save' : 'Create user'}</button></div>
     </form>`);
+  $('[name=title]', card).addEventListener('change', (e) => {
+    const pre = TITLE_PRESETS[e.target.value]; if (!pre) return;
+    const set = (n, v) => { const el = $(`[name=${n}]`, card); if (el) el.checked = !!v; };
+    set('is_exec', pre.is_exec); set('can_review', pre.can_review); set('dd_assessor', pre.dd_assessor); set('grants', pre.grants);
+    S.meta.milestones.forEach((m) => set(`ms_${m.id}`, (pre.milestones || []).includes(m.name)));
+    if (pre.role) $('[name=role]', card).value = pre.role;
+    toast(`Ticked the usual duties for ${e.target.value}. Adjust if needed.`);
+  });
   $('form', card).addEventListener('submit', async (e) => {
     e.preventDefault();
     const d = formData(e.target);
     d.states = Object.keys(d).filter((k) => k.startsWith('st_')).map((k) => k.slice(3));
     d.can_review = !!d.can_review;
+    d.is_exec = !!d.is_exec;
     Object.assign(d, readDuties(d));
     Object.keys(d).filter((k) => k.startsWith('st_')).forEach((k) => delete d[k]);
     if (u) { d.active = d.active === '1'; if (!d.password) delete d.password; }

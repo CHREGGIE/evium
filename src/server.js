@@ -65,7 +65,7 @@ function setSessionCookie(req, res, token, maxAgeSec) {
 function loadUser(req, _res, next) {
   const token = parseCookies(req)[COOKIE];
   if (token) {
-    const row = db.prepare(`SELECT u.id, u.name, u.email, u.role, u.states, u.can_review, u.dd_assessor, u.milestone_ids FROM sessions s JOIN users u ON u.id = s.user_id
+    const row = db.prepare(`SELECT u.id, u.name, u.email, u.role, u.states, u.can_review, u.dd_assessor, u.milestone_ids, u.title, u.is_exec, u.grants FROM sessions s JOIN users u ON u.id = s.user_id
       WHERE s.token = ? AND s.expires_at > datetime('now') AND u.active = 1`).get(token);
     if (row) { req.user = row; req.sessionToken = token; }
   }
@@ -120,6 +120,8 @@ app.get('/api/me', (req, res) => res.json(req.user));
 // what a person is responsible for (shapes their dashboard)
 function setDuties(userId, body) {
   if ('dd_assessor' in body) db.prepare('UPDATE users SET dd_assessor = ? WHERE id = ?').run(body.dd_assessor ? 1 : 0, userId);
+  if ('grants' in body) db.prepare('UPDATE users SET grants = ? WHERE id = ?').run(body.grants ? 1 : 0, userId);
+  if ('title' in body) db.prepare('UPDATE users SET title = ? WHERE id = ?').run(String(body.title || '').trim().slice(0, 60) || null, userId);
   if ('milestone_ids' in body) {
     const valid = new Set(db.prepare('SELECT id FROM milestones').all().map((m) => m.id));
     const ids = (Array.isArray(body.milestone_ids) ? body.milestone_ids : String(body.milestone_ids || '').split(','))
@@ -129,7 +131,7 @@ function setDuties(userId, body) {
 }
 app.patch('/api/me/duties', wrap((req, res) => {
   setDuties(req.user.id, req.body || {});
-  res.json(db.prepare('SELECT id, name, email, role, states, can_review, dd_assessor, milestone_ids FROM users WHERE id = ?').get(req.user.id));
+  res.json(db.prepare('SELECT id, name, email, role, active, states, can_review, dd_assessor, milestone_ids, title, is_exec, grants FROM users WHERE id = ?').get(req.user.id));
 }));
 
 app.post('/api/me/password', wrap((req, res) => {
@@ -147,7 +149,7 @@ const getMilestones = () => db.prepare('SELECT * FROM milestones ORDER BY positi
 app.get('/api/meta', (req, res) => {
   res.json({
     milestones: getMilestones(),
-    users: db.prepare('SELECT id, name, email, role, active, states, can_review, dd_assessor, milestone_ids FROM users ORDER BY name').all(),
+    users: db.prepare('SELECT id, name, email, role, active, states, can_review, dd_assessor, milestone_ids, title, is_exec, grants FROM users ORDER BY name').all(),
     utilities: db.prepare('SELECT id, name, states FROM utilities ORDER BY name').all(),
     rebates: db.prepare('SELECT id, name, state, kind, status, amount_text, provider FROM rebates ORDER BY state, name').all(),
     statesInUse: db.prepare("SELECT DISTINCT state FROM projects WHERE state IS NOT NULL AND state <> '' UNION SELECT DISTINCT state FROM rebates WHERE state <> 'US'").all().map((r) => r.state).sort(),
@@ -387,7 +389,7 @@ app.put('/api/milestones/:id/steps', requireAdmin, wrap((req, res) => {
 
 // ---------- dashboard ----------
 const OPEN = "('active','on_hold','blocked')";
-app.get('/api/dashboard', (req, res) => {
+app.get('/api/dashboard', wrap((req, res) => {
   const open = attachMilestones(db.prepare(`${PROJECT_SELECT} WHERE p.phase = 'pipeline' AND p.status IN ${OPEN}`).all());
   const milestones = getMilestones().map((m, i) => {
     const c = { not_started: 0, in_progress: 0, done: 0, not_needed: 0, overdue: 0 };
@@ -425,8 +427,24 @@ app.get('/api/dashboard', (req, res) => {
     LEFT JOIN users u ON u.id = a.user_id LEFT JOIN projects p ON p.id = a.project_id
     ORDER BY a.id DESC LIMIT 15`).all();
 
-  // ---- your work ----
-  const me = db.prepare('SELECT * FROM users WHERE id = ?').get(req.user.id);
+  // ---- your work (an executive can look at anyone's) ----
+  let me = db.prepare('SELECT * FROM users WHERE id = ?').get(req.user.id);
+  if (req.query.as && Number(req.query.as) !== me.id) {
+    if (!canSeeTeam(req.user)) throw new HttpError(403, 'Only executives can view other people\'s dashboards');
+    me = db.prepare('SELECT * FROM users WHERE id = ?').get(Number(req.query.as)) || notFound('User not found');
+  }
+  const mine = workFor(me, open);
+  mine.viewing = { id: me.id, name: me.name, title: me.title };
+  const theirTickets = me.id === req.user.id ? myTickets : db.prepare(`SELECT t.id, t.title, t.status, t.priority, t.due_date, p.id AS project_id, p.code, p.name AS project_name
+    FROM tickets t JOIN projects p ON p.id = t.project_id WHERE t.assignee_id = ? AND t.status NOT IN ('resolved','closed')
+    ORDER BY (t.due_date IS NULL), t.due_date LIMIT 20`).all(me.id);
+  res.json({ milestones, totals, stalled, myTickets: theirTickets, recent, mine });
+}));
+
+const canSeeTeam = (u) => u.role === 'admin' || !!u.is_exec;
+
+// Everything waiting for one person, based on what they're responsible for.
+function workFor(me, open) {
   const myStates = String(me.states || '').split(',').filter(Boolean);
   const inScope = (p) => !myStates.length || myStates.includes(p.state);  // a territory limits milestone work to those states
   const mine = { scoped: myStates, dd: null, review: null, milestones: [] };
@@ -435,7 +453,7 @@ app.get('/api/dashboard', (req, res) => {
       ORDER BY (p.dd_review_note IS NULL), p.created_at`).all());
     mine.dd_waiting = db.prepare(`SELECT COUNT(*) c FROM projects WHERE phase = 'diligence' AND dd_stage = 'review' AND status IN ${OPEN}`).get().c;
   }
-  if (canReview(me)) {
+  if (me.can_review) { // only the people set to run the 10:30 review (admins can still approve from Due Diligence)
     mine.review = attachMilestones(db.prepare(`${PROJECT_SELECT} WHERE p.phase = 'diligence' AND p.dd_stage = 'review' AND p.status IN ${OPEN}
       ORDER BY p.dd_rating DESC, p.dd_assessed_at`).all());
   }
@@ -455,8 +473,44 @@ app.get('/api/dashboard', (req, res) => {
     mine.milestones.push({ id: m.id, name: m.name, color: m.color, in_progress: inProgress, up_next: upNext });
   });
 
-  res.json({ milestones, totals, stalled, myTickets, recent, mine });
-});
+
+  // grants manager: the rebate board and sites still without a rebate
+  if (me.grants) {
+    mine.grants = {
+      needs_check: db.prepare('SELECT id, name, state, status, kind, amount_text, deadline, verified FROM rebates WHERE verified = 0 ORDER BY state, name').all(),
+      deadlines: db.prepare(`SELECT id, name, state, status, kind, amount_text, deadline, verified FROM rebates
+        WHERE deadline IS NOT NULL AND status <> 'closed' AND deadline <= date('now', '+60 days') ORDER BY deadline`).all(),
+      no_rebate: db.prepare(`SELECT p.id, p.code, p.name, p.address, p.city, p.state, p.phase FROM projects p
+        WHERE p.status IN ${OPEN} AND COALESCE(p.dd_stage, '') <> 'passed' AND TRIM(COALESCE(p.rebate_program, '')) = ''
+          AND NOT EXISTS (SELECT 1 FROM project_rebates pr WHERE pr.project_id = p.id) ORDER BY p.phase, p.created_at DESC LIMIT 30`).all(),
+    };
+  }
+  return mine;
+}
+
+// Team page: everyone's workload at a glance (executives and admins)
+app.get('/api/team', wrap((req, res) => {
+  if (!canSeeTeam(req.user)) throw new HttpError(403, 'Only executives can see the Team page');
+  const open = attachMilestones(db.prepare(`${PROJECT_SELECT} WHERE p.phase = 'pipeline' AND p.status IN ${OPEN}`).all());
+  const people = db.prepare('SELECT * FROM users WHERE active = 1').all().map((u) => {
+    const w = workFor(u, open);
+    const inProgress = w.milestones.reduce((a, g) => a + g.in_progress.length, 0);
+    const upNext = w.milestones.reduce((a, g) => a + g.up_next.length, 0);
+    const late = w.milestones.reduce((a, g) => a + g.in_progress.filter((p) => p.ms.overdue).length, 0);
+    return {
+      id: u.id, name: u.name, title: u.title, role: u.role, states: u.states, is_exec: u.is_exec, can_review: u.can_review, grants: u.grants,
+      dd_to_assess: w.dd ? w.dd.length : null, review: w.review ? w.review.length : null,
+      grants_check: w.grants ? w.grants.needs_check.length : null, grants_no_rebate: w.grants ? w.grants.no_rebate.length : null,
+      milestones: w.milestones.map((g) => ({ id: g.id, name: g.name, color: g.color, in_progress: g.in_progress.length, up_next: g.up_next.length, late: g.in_progress.filter((p) => p.ms.overdue).length })),
+      in_progress: inProgress, up_next: upNext, late,
+      sites: db.prepare(`SELECT COUNT(*) c FROM projects WHERE owner_id = ? AND status IN ${OPEN}`).get(u.id).c,
+      tickets: db.prepare("SELECT COUNT(*) c FROM tickets WHERE assignee_id = ? AND status NOT IN ('resolved','closed')").get(u.id).c,
+      reminders_due: db.prepare("SELECT COUNT(*) c FROM reminders WHERE user_id = ? AND done_at IS NULL AND due_on <= date('now')").get(u.id).c,
+      last_active: db.prepare('SELECT MAX(created_at) t FROM activity WHERE user_id = ?').get(u.id).t,
+    };
+  });
+  res.json(people);
+}));
 
 // ---------- projects ----------
 const PROJECT_FIELDS = ['name', 'customer_name', 'contact_name', 'contact_email', 'contact_phone', 'address', 'city', 'state', 'zip',
@@ -508,6 +562,14 @@ function setProjectRebates(projectId, ids, userId) {
   clean.forEach((id, i) => ins.run(projectId, id, i));
   const names = clean.map((id) => db.prepare('SELECT name FROM rebates WHERE id = ?').get(id).name);
   logActivity(projectId, userId, 'project_updated', `rebate: ${names.join(', ') || 'none'}`);
+  const added = clean.filter((id) => !before.includes(id));
+  if (added.length) {
+    const p = db.prepare('SELECT code, name, city, state FROM projects WHERE id = ?').get(projectId);
+    const actor = db.prepare('SELECT name FROM users WHERE id = ?').get(userId)?.name || 'Someone';
+    const addedNames = added.map((id) => db.prepare('SELECT name FROM rebates WHERE id = ?').get(id).name).join(', ');
+    notify(db.prepare('SELECT id FROM users WHERE active = 1 AND grants = 1').all().map((u) => u.id), { kind: 'rebate', projectId, actorId: userId,
+      text: `${actor} picked ${addedNames} for ${p.code} ${p.name}${p.city ? ` (${p.city}, ${p.state})` : ''}` });
+  }
 }
 const ADDRESS_FIELDS = ['address', 'city', 'state', 'zip'];
 
@@ -1191,7 +1253,7 @@ app.delete('/api/documents/:id', wrap((req, res) => {
 
 // ---------- admin: users ----------
 app.get('/api/users', requireAdmin, (req, res) => {
-  res.json(db.prepare('SELECT id, name, email, role, active, states, can_review, dd_assessor, milestone_ids, created_at FROM users ORDER BY name').all());
+  res.json(db.prepare('SELECT id, name, email, role, active, states, can_review, dd_assessor, milestone_ids, title, is_exec, grants, created_at FROM users ORDER BY name').all());
 });
 
 app.post('/api/users', requireAdmin, wrap((req, res) => {
@@ -1202,6 +1264,7 @@ app.post('/api/users', requireAdmin, wrap((req, res) => {
   const info = db.prepare('INSERT INTO users (name, email, password_hash, role, states, can_review) VALUES (?,?,?,?,?,?)')
     .run(String(name), String(email).trim(), hashPassword(String(password)), role === 'admin' ? 'admin' : 'staff', normStates(states), req.body?.can_review ? 1 : 0);
   setDuties(info.lastInsertRowid, req.body || {});
+  if (req.body?.is_exec) db.prepare('UPDATE users SET is_exec = 1 WHERE id = ?').run(info.lastInsertRowid);
   res.status(201).json({ id: info.lastInsertRowid });
 }));
 
@@ -1221,6 +1284,7 @@ app.patch('/api/users/:id', requireAdmin, wrap((req, res) => {
   if ('states' in (req.body || {})) db.prepare('UPDATE users SET states = ? WHERE id = ?').run(normStates(req.body.states), u.id);
   if ('can_review' in (req.body || {})) db.prepare('UPDATE users SET can_review = ? WHERE id = ?').run(req.body.can_review ? 1 : 0, u.id);
   setDuties(u.id, req.body || {});
+  if ('is_exec' in (req.body || {})) db.prepare('UPDATE users SET is_exec = ? WHERE id = ?').run(req.body.is_exec ? 1 : 0, u.id);
   res.json({ ok: true });
 }));
 

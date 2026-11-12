@@ -13,40 +13,49 @@ if (!seedPipeline && !seedDiligence && !seedDirectory) {
 
 const milestones = db.prepare('SELECT * FROM milestones ORDER BY position').all();
 
-// staff, with a territory each
+// The Evium team (demo logins all use the password changeme123).
+// Project managers own the field milestones in their states.
 const staff = [
-  ['Maya Chen', 'maya@eviumcharging.com', 'staff', 'TX'],
-  ['Jordan Reyes', 'jordan@eviumcharging.com', 'staff', 'NY,NJ,CT'],
-  ['Sam Patel', 'sam@eviumcharging.com', 'staff', 'CA,IL'],
+  ['Joe', 'joe@eviumcharging.com', 'staff', 'NY', 'Senior project manager'],
+  ['Zack', 'zack@eviumcharging.com', 'staff', 'TX,AR,FL,IL,GA,NM,OH', 'Project manager'],
+  ['Edward', 'edward@eviumcharging.com', 'staff', 'NJ,CT,PA,RI,MA', 'Project manager'],
 ];
-const userIds = staff.map(([name, email, role, states]) => {
-  const ex = db.prepare('SELECT id, states FROM users WHERE email = ?').get(email);
-  if (ex) { if (!ex.states) db.prepare('UPDATE users SET states = ? WHERE id = ?').run(states, ex.id); return ex.id; }
-  return db.prepare('INSERT INTO users (name, email, password_hash, role, states) VALUES (?,?,?,?,?)').run(name, email, hashPassword('changeme123'), role, states).lastInsertRowid;
-});
+const addUser = (name, email, role, states, title, extra = {}) => {
+  const ex = db.prepare('SELECT id FROM users WHERE email = ?').get(email);
+  if (ex) return ex.id;
+  const id = db.prepare('INSERT INTO users (name, email, password_hash, role, states, title) VALUES (?,?,?,?,?,?)')
+    .run(name, email, hashPassword('changeme123'), role, states, title).lastInsertRowid;
+  Object.entries(extra).forEach(([k, v]) => db.prepare(`UPDATE users SET ${k} = ? WHERE id = ?`).run(v, id));
+  return id;
+};
+const userIds = staff.map(([name, email, role, states, title]) => addUser(name, email, role, states, title));
 const admin = db.prepare("SELECT id FROM users WHERE role = 'admin' ORDER BY id LIMIT 1").get()?.id || userIds[0];
-const jojo = db.prepare('SELECT id FROM users WHERE email = ?').get('jojo@eviumcharging.com')?.id
-  ?? db.prepare("INSERT INTO users (name, email, password_hash, role, can_review) VALUES ('JoJo', 'jojo@eviumcharging.com', ?, 'staff', 1)").run(hashPassword('changeme123')).lastInsertRowid;
+addUser('David', 'david@eviumcharging.com', 'admin', null, 'CEO', { is_exec: 1 });
+const jojo = addUser('JoJo', 'jojo@eviumcharging.com', 'staff', null, 'Executive', { is_exec: 1, can_review: 1 });
+addUser('Michael', 'michael@eviumcharging.com', 'staff', null, 'Grants manager', { grants: 1 });
 // what each person is responsible for (shapes their dashboard), only where nothing is set yet
 {
   const msId = (n) => milestones.find((m) => m.name === n)?.id;
   const setDuty = db.prepare("UPDATE users SET dd_assessor = ?, milestone_ids = ? WHERE id = ? AND COALESCE(milestone_ids, '') = '' AND dd_assessor = 0");
-  // the admin login stands in for the account manager: assesses due diligence, sends proposals, does contracts
+  // the admin login stands in for the account manager: due diligence, client relationships, sending proposals and contracts
   setDuty.run(1, [msId('Send proposal'), msId('Contract')].filter(Boolean).join(','), admin);
-  // state managers handle the field work in their territory
+  db.prepare("UPDATE users SET title = COALESCE(title, 'Account manager') WHERE id = ?").run(admin);
   // project managers: site walk & proposal, then the field work, in their territory
   userIds.forEach((id) => setDuty.run(0, ['Site walk & proposal', 'Permitting', 'Approvals', 'Installation'].map(msId).filter(Boolean).join(','), id));
 }
 
 // ---------- utility directory (sample entries: add your own contacts) ----------
 const UTILITIES = [
-  ['Con Edison', 'NY', 'https://www.coned.com'], ['National Grid', 'NY', 'https://www.nationalgridus.com'],
+  ['Con Edison', 'NY', 'https://www.coned.com'], ['National Grid', 'NY,MA', 'https://www.nationalgridus.com'],
   ['PSE&G', 'NJ', 'https://nj.pseg.com'], ['JCP&L', 'NJ', 'https://www.firstenergycorp.com'], ['Atlantic City Electric', 'NJ', 'https://www.atlanticcityelectric.com'],
   ['Oncor', 'TX', 'https://www.oncor.com'], ['CenterPoint Energy', 'TX', 'https://www.centerpointenergy.com'], ['Austin Energy', 'TX', 'https://austinenergy.com'],
   ['Central Texas Electric Co-op', 'TX', null],
-  ['PG&E', 'CA', 'https://www.pge.com'], ['SCE', 'CA', 'https://www.sce.com'], ['SDG&E', 'CA', 'https://www.sdge.com'], ['SMUD', 'CA', 'https://www.smud.org'],
-  ['Eversource', 'CT', 'https://www.eversource.com'], ['United Illuminating', 'CT', 'https://www.uinet.com'],
+  ['Eversource', 'CT,MA', 'https://www.eversource.com'], ['United Illuminating', 'CT', 'https://www.uinet.com'],
   ['ComEd', 'IL', 'https://www.comed.com'], ['Ameren Illinois', 'IL', 'https://www.ameren.com'],
+  ['PECO', 'PA', 'https://www.peco.com'], ['PPL Electric Utilities', 'PA', 'https://www.pplelectric.com'], ['Rhode Island Energy', 'RI', 'https://www.rienergy.com'],
+  ['Florida Power & Light (FPL)', 'FL', 'https://www.fpl.com'], ['Tampa Electric (TECO)', 'FL', 'https://www.tampaelectric.com'], ['Duke Energy Florida', 'FL', 'https://www.duke-energy.com'],
+  ['Georgia Power', 'GA', 'https://www.georgiapower.com'], ['PNM', 'NM', 'https://www.pnm.com'], ['AEP Ohio', 'OH', 'https://www.aepohio.com'],
+  ['Entergy Arkansas', 'AR', 'https://www.entergy-arkansas.com'],
 ];
 const utilId = {};
 const findUtil = db.prepare('SELECT id FROM utilities WHERE name = ?');
@@ -87,14 +96,6 @@ const REBATES = [
     amount_text: 'Grant toward a share of eligible project costs (opens in funding rounds)', url: 'https://www.tceq.texas.gov/airquality/terp',
     summary: 'Texas grant for building alternative fueling and EV charging facilities, offered in funding rounds.',
     offer: 'Best for DC fast chargers on major corridors and fleet depots.', requirements: 'Site in an eligible Texas county\nApply during an open funding round\nOperate the station for the required period' }),
-  R({ key: 'caCALeVIP', name: 'CALeVIP', state: 'CA', provider: 'California Energy Commission', kind: 'rebate', status: 'waitlist', charger_types: 'L2,DCFC',
-    amount_text: 'Regional rebates for Level 2 and DC fast chargers (amounts vary by project)', url: 'https://calevip.org',
-    summary: 'California Electric Vehicle Infrastructure Project: regional rebate projects for public and shared chargers.',
-    offer: 'Level 2 and DC fast, depending on which regional project is open.', requirements: 'Site inside an active project region\nPublicly accessible chargers\nReserve funds before buying equipment' }),
-  R({ key: 'caSCE', name: 'SCE Charge Ready', state: 'CA', provider: 'Southern California Edison', kind: 'make_ready', status: 'open', charger_types: 'L2,DCFC', utility: 'SCE',
-    amount_text: 'SCE builds and pays for much of the make-ready infrastructure', url: 'https://www.sce.com/business/electric-cars/charge-ready',
-    summary: 'Southern California Edison program that covers the electrical infrastructure for chargers at customer sites.',
-    offer: 'Level 2 and DC fast at SCE sites.', requirements: 'SCE customer\nMinimum number of ports per site' }),
   R({ key: 'ctEVCP', name: 'CT EV Charging Program (EVCP)', state: 'CT', provider: 'Eversource & United Illuminating', kind: 'rebate', status: 'open', charger_types: 'L2,DCFC',
     site_types: 'workplace, multifamily, public', amount_text: 'Incentives per port for Level 2 and DC fast chargers (check current amounts)', url: 'https://www.eversource.com',
     summary: 'Connecticut utility incentives for chargers at public, workplace and multifamily sites in Eversource and UI territory.',
@@ -147,7 +148,7 @@ const projects = [
   ['Market Street Parking Structure', 'Market Street Parking Co', 'Kevin Lee', 'kevin@marketst.example', '555-0109', '77 Market St', 'Newark', 'NJ', '07102', 'parking', 'L2', 24, 173, 140000, 'I-----', 'active', 'medium', 2, 40.7357, -74.1724, 'PSE&G', ['njPSEG']],
   ['Greenway Grocers #14', 'Greenway Grocers', 'Sofia Alvarez', 'sofia@greenway.example', '555-0110', '1400 W Ogden Ave', 'Naperville', 'IL', '60563', 'retail', 'DCFC', 4, 600, 420000, 'DIIN--', 'active', 'high', 15, 41.7720, -88.1739, 'ComEd', ['ilComEd']],
   ['Northgate Office Park', 'Northgate REIT', 'Brian Cole', 'bcole@northgate.example', '555-0111', '2 Northgate Ct', 'Frisco', 'TX', '75034', 'workplace', 'L2', 14, 101, 76000, 'DDD-I-', 'active', 'medium', 26, 33.1507, -96.8236, 'Oncor', []],
-  ['Bayview Transit Hub', 'Bayview Transit Authority', 'Grace Park', 'gpark@bayview.example', '555-0112', '1 Harbor Dr', 'San Diego', 'CA', '92101', 'municipal', 'DCFC', 10, 1500, 1020000, 'DDIIN-', 'active', 'high', 18, 32.7157, -117.1611, 'SDG&E', ['caCALeVIP']],
+  ['Bayview Transit Hub', 'Bayview Transit Authority', 'Grace Park', 'gpark@bayview.example', '555-0112', '601 N Florida Ave', 'Tampa', 'FL', '33602', 'municipal', 'DCFC', 10, 1500, 1020000, 'DDIIN-', 'active', 'high', 18, 27.9506, -82.4572, 'Tampa Electric (TECO)', []],
   ['Atlantic Commons Shopping Center', 'Atlantic Commons Retail', 'Marco Silva', 'msilva@atlanticcommons.example', '555-0113', '550 Atlantic Ave', 'Brooklyn', 'NY', '11217', 'retail', 'L2 + DCFC', 12, 480, 365000, 'D-----', 'active', 'medium', 6, 40.6846, -73.9776, 'Con Edison', ['nyConEd', 'nyCRNY']],
 ];
 
@@ -163,8 +164,8 @@ const diligence = [
     'new', null, null, null],
   ['Riverbend Business Park', '2400 Commerce Dr', 'Plano', 'TX', '75074', 'workplace', 'Riverbend Partners', '972-555-0133', null, null, 'Oncor', 1, 33.0198, -96.6989, [],
     'new', null, null, null],
-  ['Sacramento Logistics Yard', '4800 Power Inn Rd', 'Sacramento', 'CA', '95826', 'fleet', null, null, 'HVIP + SMUD fleet electrification', 250000, 'SMUD', 9, 38.5371, -121.4171, [],
-    'new', 3, 'Big fleet opportunity, but we still don\'t know who owns the yard versus the operator.', 'Find out who owns the yard and whether SMUD has capacity for DC fast before we go further.'],
+  ['Columbus Logistics Yard', '4800 Fisher Rd', 'Columbus', 'OH', '43228', 'fleet', null, null, 'Fleet electrification grant (to research)', 250000, 'AEP Ohio', 9, 39.9690, -83.0930, [],
+    'new', 3, 'Big fleet opportunity, but we still don\'t know who owns the yard versus the operator.', 'Find out who owns the yard and whether AEP Ohio has capacity for DC fast before we go further.'],
   ['Hill Country Inn', '250 Main St', 'Fredericksburg', 'TX', '78624', 'hospitality', 'Hill Country Hospitality', '830-555-0177', 'None', null, 'Central Texas Electric Co-op', 12, 30.2752, -98.8720, [],
     'passed', 2, 'Small inn with 18 spaces and an old 200A panel. Little traffic outside weekends and no rebate in this co-op territory.', 'Too small and no rebate to make the numbers work. Revisit if the co-op launches a program.'],
 ];
@@ -179,6 +180,8 @@ const insMH = db.prepare(`INSERT INTO milestone_history (project_id, milestone_i
   VALUES (?,?,?,?,?,?, datetime('now', ?))`);
 const insT = db.prepare('INSERT INTO tickets (project_id, title, type, priority, status, assignee_id, due_date, created_by, description) VALUES (?,?,?,?,?,?, date(\'now\', ?),?,?)');
 const insA = db.prepare('INSERT INTO activity (project_id, user_id, action, detail) VALUES (?,?,?,?)');
+// the site's project manager (sample tickets and messages come from them)
+const siteOwner = (pid) => db.prepare('SELECT owner_id FROM projects WHERE id = ?').get(pid)?.owner_id || admin;
 const insPR = db.prepare('INSERT OR IGNORE INTO project_rebates (project_id, rebate_id, position) VALUES (?,?,?)');
 const linkRebates = (pid, keys) => keys.forEach((k, i) => rebateId[k] && insPR.run(pid, rebateId[k], i));
 const CODE = { D: 'done', I: 'in_progress', N: 'not_needed' };
@@ -239,7 +242,7 @@ if (seedPipeline) db.transaction(() => {
     [10, 'Prepare ComEd make-ready rebate application', 'utility', 'high', 'open', 2, '+7 days'],
   ];
   t.forEach(([pi, title, type, prio, status, ui, due]) => {
-    insT.run(pi, title, type, prio, status, userIds[ui], due, userIds[0], null);
+    insT.run(pi, title, type, prio, status, siteOwner(pi), due, siteOwner(pi), null);
     insA.run(pi, userIds[0], 'ticket_created', title);
   });
 
@@ -251,13 +254,13 @@ if (seedPipeline) db.transaction(() => {
     [1, 4, 0, 'Permit submitted to the City of Austin. Their portal says 4–6 weeks.', '-40 days'],
     [1, 5, 1, 'Landlord approval came back early, so approvals are done even though the permit is still out.', '-30 days'],
     [1, 4, 2, 'Plan review came back with comments on the load calc. Working on a response.', '-3 days'],
-    [1, 4, 0, 'Sent the revised load calc this morning. @Jordan Reyes can you double-check the panel schedule?', '-1 days'],
+    [1, 4, 0, 'Sent the revised load calc this morning. @JoJo can you take a look before it goes back to the city?', '-1 days'],
     [2, 5, 0, 'CenterPoint still has no date for the transformer upgrade. Escalated to our utility rep.', '-10 days'],
     [2, 0, 0, 'Customer is asking if we can start trenching while we wait on the utility.', '-2 days'],
     [13, 0, 1, 'Stacking Con Ed PowerReady with Charge Ready NY here. Owner is happy with the numbers.', '-4 days'],
   ].forEach(([pi, pos, ui, body, ago]) => {
     const m = pos ? milestones[pos - 1] : null;
-    insMsg.run(pi, m?.id ?? null, m?.name ?? null, userIds[ui], body, ago);
+    insMsg.run(pi, m?.id ?? null, m?.name ?? null, siteOwner(pi), body, ago);
   });
 
   // follow-up reminders (one due today for the admin, so the Dashboard shows it)
