@@ -238,7 +238,34 @@ function setMilestone(projectId, milestone, status, userId, note, t = now()) {
     .run(projectId, milestone.id, milestone.name, from, status, userId, note, t);
   const lbl = (s) => s.replace('_', ' ');
   logActivity(projectId, userId, 'milestone_updated', `${milestone.name}: ${lbl(from)} → ${lbl(status)}${note ? ` — ${note}` : ''}`);
+  if (status === 'done' && from !== 'done') notifyHandoff(projectId, milestone, userId);
   return true;
+}
+
+// People who own a milestone (ticked in their duties) and cover the site's state.
+// Someone with no territory covers every state.
+function milestoneOwners(milestoneId, state) {
+  return db.prepare('SELECT id, name, states, milestone_ids FROM users WHERE active = 1').all()
+    .filter((u) => String(u.milestone_ids || '').split(',').map(Number).includes(milestoneId))
+    .filter((u) => !u.states || !state || String(u.states).split(',').includes(state));
+}
+
+// Handoff: a milestone was just finished. Tell the owners of the next unfinished milestone it's their turn,
+// or tell the site's owner when everything is done.
+function notifyHandoff(projectId, milestone, actorId) {
+  const p = db.prepare('SELECT id, code, name, city, state, owner_id FROM projects WHERE id = ?').get(projectId);
+  const actor = db.prepare('SELECT name FROM users WHERE id = ?').get(actorId)?.name || 'Someone';
+  const statuses = Object.fromEntries(db.prepare('SELECT milestone_id, status FROM project_milestones WHERE project_id = ?').all(projectId).map((r) => [r.milestone_id, r.status]));
+  const all = getMilestones();
+  const finished = (m) => ['done', 'not_needed'].includes(statuses[m.id]);
+  const where = `${p.code} ${p.name}${p.city ? ` (${p.city}, ${p.state})` : ''}`;
+  const next = all.slice(all.findIndex((m) => m.id === milestone.id) + 1).find((m) => !finished(m)) || all.find((m) => !finished(m));
+  if (!next) {
+    notify([p.owner_id], { kind: 'handoff', projectId, actorId, text: `${actor} finished ${milestone.name} on ${where}. Every milestone is done: this site is live.` });
+    return;
+  }
+  notify(milestoneOwners(next.id, p.state).map((u) => u.id), { kind: 'handoff', projectId, milestoneId: next.id, actorId,
+    text: `${actor} finished ${milestone.name} on ${where}. ${next.name} is up to you now.` });
 }
 
 // Apply a {milestone_id: status} map (used when a project enters the pipeline)
@@ -652,7 +679,9 @@ app.post('/api/projects/:id/review', wrap((req, res) => {
       logActivity(p.id, req.user.id, 'review_passed', `Passed${note ? `: ${note}` : ''}`);
     } else {
       // approved: into the pipeline with the site walk under way
-      const managers = stateManagers(p.state);
+      const walkMs = siteWalkMilestone();
+      let managers = walkMs ? milestoneOwners(walkMs.id, p.state) : [];
+      if (!managers.length) managers = stateManagers(p.state);
       const ownerOk = managers.some((m) => m.id === p.owner_id);
       db.prepare(`UPDATE projects SET dd_stage = 'approved', phase = 'pipeline', stage_entered_at = ?, diligence_completed_at = ?,
         owner_id = ?, ${base} WHERE id = ?`).run(t, t, ownerOk || !managers.length ? p.owner_id : managers[0].id, note, req.user.id, t, t, p.id);
@@ -668,7 +697,7 @@ app.post('/api/projects/:id/review', wrap((req, res) => {
       }
       notified = managers.map((m) => m.name);
       notify(managers.map((m) => m.id), { kind: 'site_walk', projectId: p.id, milestoneId: walk?.id, actorId: req.user.id,
-        text: `${req.user.name} approved ${p.code} ${p.name}${p.city ? ` (${p.city}, ${p.state})` : ''} for a site walk${note ? `: ${note}` : ''}` });
+        text: `${req.user.name} approved ${p.code} ${p.name}${p.city ? ` (${p.city}, ${p.state})` : ''}: ${walk ? walk.name : 'the site walk'} is up to you${note ? `. ${note}` : ''}` });
     }
   })();
   res.json({ ...getProject(p.id), notified });

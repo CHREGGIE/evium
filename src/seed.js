@@ -31,10 +31,11 @@ const jojo = db.prepare('SELECT id FROM users WHERE email = ?').get('jojo@eviumc
 {
   const msId = (n) => milestones.find((m) => m.name === n)?.id;
   const setDuty = db.prepare("UPDATE users SET dd_assessor = ?, milestone_ids = ? WHERE id = ? AND COALESCE(milestone_ids, '') = '' AND dd_assessor = 0");
-  // the admin login stands in for the due diligence / proposals & contracts person
-  setDuty.run(1, [msId('Proposal'), msId('Contract')].filter(Boolean).join(','), admin);
+  // the admin login stands in for the account manager: assesses due diligence, sends proposals, does contracts
+  setDuty.run(1, [msId('Send proposal'), msId('Contract')].filter(Boolean).join(','), admin);
   // state managers handle the field work in their territory
-  userIds.forEach((id) => setDuty.run(0, ['Site walk', 'Permitting', 'Approvals', 'Installation'].map(msId).filter(Boolean).join(','), id));
+  // project managers: site walk & proposal, then the field work, in their territory
+  userIds.forEach((id) => setDuty.run(0, ['Site walk & proposal', 'Permitting', 'Approvals', 'Installation'].map(msId).filter(Boolean).join(','), id));
 }
 
 // ---------- utility directory (sample entries: add your own contacts) ----------
@@ -129,7 +130,7 @@ if (seedDirectory) {
 }
 
 // Milestone codes, one letter per default milestone in order
-// (Site walk, Proposal, Contract, Permitting, Approvals, Installation):
+// (Site walk & proposal, Send proposal, Contract, Permitting, Approvals, Installation):
 //   D = done, I = in progress, N = not needed, - = not started.
 // They deliberately don't all follow the same order — e.g. approvals done before permitting.
 // [name, customer, contact, email, phone, address, city, state, zip, site type, charger type, ports, kW, value,
@@ -147,7 +148,7 @@ const projects = [
   ['Greenway Grocers #14', 'Greenway Grocers', 'Sofia Alvarez', 'sofia@greenway.example', '555-0110', '1400 W Ogden Ave', 'Naperville', 'IL', '60563', 'retail', 'DCFC', 4, 600, 420000, 'DIIN--', 'active', 'high', 15, 41.7720, -88.1739, 'ComEd', ['ilComEd']],
   ['Northgate Office Park', 'Northgate REIT', 'Brian Cole', 'bcole@northgate.example', '555-0111', '2 Northgate Ct', 'Frisco', 'TX', '75034', 'workplace', 'L2', 14, 101, 76000, 'DDD-I-', 'active', 'medium', 26, 33.1507, -96.8236, 'Oncor', []],
   ['Bayview Transit Hub', 'Bayview Transit Authority', 'Grace Park', 'gpark@bayview.example', '555-0112', '1 Harbor Dr', 'San Diego', 'CA', '92101', 'municipal', 'DCFC', 10, 1500, 1020000, 'DDIIN-', 'active', 'high', 18, 32.7157, -117.1611, 'SDG&E', ['caCALeVIP']],
-  ['Atlantic Commons Shopping Center', 'Atlantic Commons Retail', 'Marco Silva', 'msilva@atlanticcommons.example', '555-0113', '550 Atlantic Ave', 'Brooklyn', 'NY', '11217', 'retail', 'L2 + DCFC', 12, 480, 365000, 'DI----', 'active', 'medium', 6, 40.6846, -73.9776, 'Con Edison', ['nyConEd', 'nyCRNY']],
+  ['Atlantic Commons Shopping Center', 'Atlantic Commons Retail', 'Marco Silva', 'msilva@atlanticcommons.example', '555-0113', '550 Atlantic Ave', 'Brooklyn', 'NY', '11217', 'retail', 'L2 + DCFC', 12, 480, 365000, 'D-----', 'active', 'medium', 6, 40.6846, -73.9776, 'Con Edison', ['nyConEd', 'nyCRNY']],
 ];
 
 // Properties in due diligence:

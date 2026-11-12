@@ -229,8 +229,8 @@ CREATE INDEX IF NOT EXISTS idx_messages_project ON messages(project_id, created_
 `);
 
 const DEFAULT_MILESTONES = [
-  ['Site walk', '#38bdf8', 14],
-  ['Proposal', '#a78bfa', 14],
+  ['Site walk & proposal', '#38bdf8', 21],   // project manager: walk the site and create the proposal
+  ['Send proposal', '#a78bfa', 14],          // account manager: send it and get it accepted
   ['Contract', '#f472b6', 21],
   ['Permitting', '#f59e0b', 45],
   ['Approvals', '#eab308', 45],
@@ -245,14 +245,14 @@ if (db.prepare('SELECT COUNT(*) c FROM milestones').get().c === 0) {
   // One-time conversion: turn each pipeline project's old single stage into milestone statuses.
   // [milestones done, milestone in progress] for each of the original default stage names.
   const STAGE_MAP = {
-    'Lead': [[], null], 'Qualified': [[], null], 'Site Survey': [[], 'Site walk'],
-    'Proposal Sent': [['Site walk'], 'Proposal'], 'Contract Signed': [['Site walk', 'Proposal', 'Contract'], null],
-    'Design & Engineering': [['Site walk', 'Proposal', 'Contract'], 'Permitting'],
-    'Permitting': [['Site walk', 'Proposal', 'Contract'], 'Permitting'],
-    'Utility / Make-Ready': [['Site walk', 'Proposal', 'Contract', 'Permitting'], 'Approvals'],
-    'Installation': [['Site walk', 'Proposal', 'Contract', 'Permitting', 'Approvals'], 'Installation'],
-    'Commissioning': [['Site walk', 'Proposal', 'Contract', 'Permitting', 'Approvals', 'Installation'], null],
-    'Live / Operational': [['Site walk', 'Proposal', 'Contract', 'Permitting', 'Approvals', 'Installation'], null],
+    'Lead': [[], null], 'Qualified': [[], null], 'Site Survey': [[], 'Site walk & proposal'],
+    'Proposal Sent': [['Site walk & proposal'], 'Send proposal'], 'Contract Signed': [['Site walk & proposal', 'Send proposal', 'Contract'], null],
+    'Design & Engineering': [['Site walk & proposal', 'Send proposal', 'Contract'], 'Permitting'],
+    'Permitting': [['Site walk & proposal', 'Send proposal', 'Contract'], 'Permitting'],
+    'Utility / Make-Ready': [['Site walk & proposal', 'Send proposal', 'Contract', 'Permitting'], 'Approvals'],
+    'Installation': [['Site walk & proposal', 'Send proposal', 'Contract', 'Permitting', 'Approvals'], 'Installation'],
+    'Commissioning': [['Site walk & proposal', 'Send proposal', 'Contract', 'Permitting', 'Approvals', 'Installation'], null],
+    'Live / Operational': [['Site walk & proposal', 'Send proposal', 'Contract', 'Permitting', 'Approvals', 'Installation'], null],
   };
   const ms = Object.fromEntries(db.prepare('SELECT id, name FROM milestones').all().map((m) => [m.name, m.id]));
   const rows = db.prepare(`SELECT p.id, p.stage_entered_at, s.name AS stage FROM projects p JOIN stages s ON s.id = p.stage_id
@@ -367,7 +367,7 @@ addColumns('projects', {
 addColumns('users', { states: 'TEXT' });   // territory, e.g. "NY,NJ"
 // Documents that must be uploaded before a milestone can be marked done (document categories)
 if (addColumns('milestones', { required_docs: 'TEXT' }).length) {
-  const DEFAULT_DOCS = { 'Site walk': 'photo', 'Proposal': 'proposal', 'Contract': 'contract', 'Permitting': 'permit', 'Installation': 'photo' };
+  const DEFAULT_DOCS = { 'Site walk & proposal': 'proposal', 'Site walk': 'photo', 'Proposal': 'proposal', 'Contract': 'contract', 'Permitting': 'permit', 'Installation': 'photo' };
   const upd = db.prepare('UPDATE milestones SET required_docs = ? WHERE name = ?');
   Object.entries(DEFAULT_DOCS).forEach(([name, cat]) => upd.run(cat, name));
 }
@@ -416,9 +416,10 @@ CREATE INDEX IF NOT EXISTS idx_psteps ON project_steps(project_id, milestone_id,
 addColumns('documents', { milestone_id: 'INTEGER REFERENCES milestones(id) ON DELETE SET NULL' });
 
 const DEFAULT_STEPS = {
-  'Site walk': ['Schedule the site walk with the owner', 'Photos of the parking area', 'Photos of the electrical room and panel',
-    'Note panel size and spare capacity', 'Measure distance from panel to charger spots', 'Locate transformer and meter', 'Write up site walk notes'],
-  'Proposal': ['Draft charger layout', 'Get electrical quote', 'Confirm rebate amount', 'Price the proposal', 'Send proposal to customer', 'Customer feedback / revisions'],
+  'Site walk & proposal': ['Schedule the site walk with the owner', 'Photos of the parking area', 'Photos of the electrical room and panel',
+    'Note panel size and spare capacity', 'Measure distance from panel to charger spots', 'Write up site walk notes',
+    'Draft charger layout', 'Get electrical quote', 'Confirm rebate amount', 'Create and price the proposal'],
+  'Send proposal': ['Review the proposal', 'Send proposal to customer', 'Follow up with customer', 'Customer feedback / revisions', 'Customer accepts proposal'],
   'Contract': ['Draft contract', 'Agree terms with customer', 'Customer signs', 'Evium countersigns', 'Deposit received'],
   'Permitting': ['Electrical drawings / single-line diagram', 'Load calculation', 'Submit permit application', 'Answer plan review comments', 'Permit approved'],
   'Approvals': ['Submit utility application', 'Utility approval and energization date', 'Property owner / landlord approval', 'Submit rebate application', 'Rebate pre-approval received'],
@@ -428,6 +429,23 @@ if (db.prepare('SELECT COUNT(*) c FROM milestone_steps').get().c === 0) {
   const ins = db.prepare('INSERT INTO milestone_steps (milestone_id, label, position) VALUES (?,?,?)');
   db.transaction(() => db.prepare('SELECT id, name FROM milestones').all()
     .forEach((m) => (DEFAULT_STEPS[m.name] || []).forEach((label, i) => ins.run(m.id, label, i))))();
+}
+// one-time: databases with the original "Site walk" + "Proposal" milestones move to the new setup
+{
+  const byName = (n) => db.prepare('SELECT * FROM milestones WHERE name = ?').get(n);
+  const walk = byName('Site walk'); const prop = byName('Proposal');
+  if (walk && prop && !byName('Site walk & proposal') && !byName('Send proposal')) {
+    const setSteps = (id, labels) => {
+      db.prepare('DELETE FROM milestone_steps WHERE milestone_id = ?').run(id);
+      labels.forEach((l, i) => db.prepare('INSERT INTO milestone_steps (milestone_id, label, position) VALUES (?,?,?)').run(id, l, i));
+    };
+    db.transaction(() => {
+      db.prepare("UPDATE milestones SET name = ?, sla_days = 21, required_docs = 'proposal' WHERE id = ?").run('Site walk & proposal', walk.id);
+      db.prepare('UPDATE milestones SET name = ?, required_docs = NULL WHERE id = ?').run('Send proposal', prop.id);
+      setSteps(walk.id, DEFAULT_STEPS['Site walk & proposal']);
+      setSteps(prop.id, DEFAULT_STEPS['Send proposal']);
+    })();
+  }
 }
 
 // One-time: turn the typed-in utility names on existing sites into directory entries

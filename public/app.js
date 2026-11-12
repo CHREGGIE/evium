@@ -189,7 +189,7 @@ const territoryToggle = (on) => (myStates().length
   ? `<button type="button" class="chip ${on ? 'active' : ''}" id="mineToggle" title="Only show ${esc(myStates().join(', '))}">★ My territory</button>` : '');
 
 // ---------- notifications ----------
-const NOTIF_ICON = { site_walk: '→', review: '?', mention: '@', message: '💬', reminder: '⏰', reminder_set: '⏰', territory: '★' };
+const NOTIF_ICON = { handoff: '→', site_walk: '→', review: '?', mention: '@', message: '💬', reminder: '⏰', reminder_set: '⏰', territory: '★' };
 let bellTimer = null;
 async function refreshBell() {
   if (!S.me) return;
@@ -963,7 +963,13 @@ const reviewers = () => {
   const named = S.meta.users.filter((u) => u.active && u.can_review);
   return (named.length ? named : S.meta.users.filter((u) => u.active && u.role === 'admin')).map((u) => u.name.split(' ')[0]);
 };
-const managersFor = (state) => S.meta.users.filter((u) => u.active && state && String(u.states || '').split(',').includes(state));
+const ownersOf = (milestoneId, state) => S.meta.users.filter((u) => u.active && myMilestoneIds(u).includes(milestoneId)
+  && (!u.states || !state || String(u.states).split(',').includes(state)));
+const siteWalkMs = () => S.meta.milestones.find((m) => m.name.toLowerCase().includes('site walk')) || S.meta.milestones[0];
+const managersFor = (state) => {
+  const owners = siteWalkMs() ? ownersOf(siteWalkMs().id, state) : [];
+  return owners.length ? owners : S.meta.users.filter((u) => u.active && state && String(u.states || '').split(',').includes(state));
+};
 const ratingView = (r) => (r ? `<span class="rating r${r}" title="${r} of 5 · ${RATING_LABEL[r]}"><span class="rating-bars">${[1, 2, 3, 4, 5].map((n) => `<i class="${n <= r ? 'on' : ''}"></i>`).join('')}</span><b>${r}</b>/5 <span class="muted">${RATING_LABEL[r]}</span></span>` : '<span class="muted small">Not rated</span>');
 const DD_STAGE_LABEL = { new: 'To assess', review: 'Waiting for 10:30 review', passed: 'Passed', approved: 'Approved' };
 const siteLine = (p) => [[p.city, p.state].filter(Boolean).join(', '), p.address ? p.name : '', p.code].filter(Boolean).join(' · ');
@@ -1010,7 +1016,7 @@ async function renderDiligence() {
       <div class="small dd-facts">${siteFacts(p)}</div>
       ${p.rebates.length ? `<div class="rl-row"><span class="muted small">Rebate</span>${p.rebates.map((r) => rebateLine(r)).join('')}</div>` : ''}
       <div class="dd-card2-foot">
-        <span class="muted small">Assessed by ${esc(p.assessed_by_name || '—')} · ${fdate(p.dd_assessed_at)}${managersFor(p.state).length ? ` · ${esc(p.state)} manager: ${esc(managersFor(p.state).map((u) => u.name).join(', '))}` : ''}</span>
+        <span class="muted small">Assessed by ${esc(p.assessed_by_name || '—')} · ${fdate(p.dd_assessed_at)}${managersFor(p.state).length ? ` · ${esc(siteWalkMs()?.name || 'Site walk')}: ${esc(managersFor(p.state).map((u) => u.name).join(', '))}` : ''}</span>
         <span class="dd-btns">${canReview()
           ? `<button class="btn" data-review="info" data-id="${p.id}">Needs more info</button><button class="btn" data-review="pass" data-id="${p.id}">Pass</button><button class="btn primary" data-review="approve" data-id="${p.id}">Approve for site walk</button>`
           : `<button class="btn" data-assess="${p.id}">Edit rating</button>`}</span>
@@ -1106,8 +1112,8 @@ function reviewModal(p, decision, after) {
       <div style="margin-top:6px">${ratingView(p.dd_rating)}</div>
       ${p.dd_insight ? `<div class="small dd-insight" style="margin-top:6px">${esc(p.dd_insight)}</div>` : ''}</div>
     ${decision === 'approve' ? (managers.length
-      ? `<div class="note-ok small">It moves to the Pipeline with the site walk under way, and <b>${esc(managers.map((u) => u.name).join(', '))}</b> (${esc(p.state)} manager${managers.length === 1 ? '' : 's'}) will be notified.</div>`
-      : `<div class="note-warn small">Nobody has ${esc(p.state || 'this state')} in their territory, so nobody will be notified. Set territories in Admin.</div>`) : ''}
+      ? `<div class="note-ok small">It moves to the Pipeline with ${esc(siteWalkMs()?.name || 'the site walk')} under way, and <b>${esc(managers.map((u) => u.name).join(', '))}</b> will be notified.</div>`
+      : `<div class="note-warn small">Nobody covers ${esc(siteWalkMs()?.name || 'the site walk')} in ${esc(p.state || 'this state')}, so nobody will be notified. Set people's milestones and territories in Admin.</div>`) : ''}
     ${decision === 'info' ? `<div class="muted small" style="margin-bottom:8px">It goes back to To assess${p.assessed_by_name ? `, and ${esc(p.assessed_by_name)} is notified` : ''}.</div>` : ''}
     <form class="grid">
       <label>${cfg.label}<textarea name="note" rows="4" ${cfg.required ? 'required' : ''} placeholder="${esc(cfg.ph)}"></textarea></label>
@@ -1879,7 +1885,7 @@ function userForm(u = null) {
       <label class="full">${u ? 'Reset password (leave blank to keep)' : 'Temporary password (min 8)'}<input name="password" type="text" ${u ? '' : 'required'} minlength="8" autocomplete="off"></label>
       <label class="full check-inline"><input type="checkbox" name="can_review" ${u?.can_review ? 'checked' : ''}> Runs the 10:30 due diligence review (can approve or pass sites; admins always can)</label>
       <div class="full grid" style="gap:8px">${dutiesFields(u)}</div>
-      <fieldset class="checkset full"><legend>Territory: the states they manage. They see these first and are notified when a site there is approved for a site walk</legend>
+      <fieldset class="checkset full"><legend>Territory: the states they cover. Their milestone work and pings are limited to these (none = every state)</legend>
         ${[...new Set([...CORE_STATES, ...S.meta.statesInUse, ...String(u?.states || '').split(',').filter(Boolean)])].map((st) => `<label><input type="checkbox" name="st_${st}" ${String(u?.states || '').split(',').includes(st) ? 'checked' : ''}> ${st}</label>`).join('')}</fieldset>
       <div class="modal-foot full"><button type="button" class="btn" data-close>Cancel</button><button class="btn primary">${u ? 'Save' : 'Create user'}</button></div>
     </form>`);
