@@ -6,7 +6,8 @@ const { db, hashPassword } = require('./db');
 const seedPipeline = db.prepare('SELECT COUNT(*) c FROM projects').get().c === 0;
 const seedDiligence = db.prepare("SELECT COUNT(*) c FROM projects WHERE phase = 'diligence'").get().c === 0;
 const seedDirectory = db.prepare('SELECT COUNT(*) c FROM rebates').get().c === 0;
-if (!seedPipeline && !seedDiligence && !seedDirectory) {
+const seedElectricians = db.prepare('SELECT COUNT(*) c FROM contractors').get().c === 0;
+if (!seedPipeline && !seedDiligence && !seedDirectory && !seedElectricians) {
   console.log('Demo data already loaded – nothing to add.');
   process.exit(0);
 }
@@ -170,6 +171,47 @@ const diligence = [
     'passed', 2, 'Small inn with 18 spaces and an old 200A panel. Little traffic outside weekends and no rebate in this co-op territory.', 'Too small and no rebate to make the numbers work. Revisit if the co-op launches a program.'],
 ];
 
+// ---------- electricians (made up for the demo: fake .example emails and 555 numbers) ----------
+// [company, contact, phone, states, license, notes]. At least three per company state, so every site can get three quotes.
+const ELECTRICIANS = [
+  ['Empire Electric Co.', 'Tony Russo', '718-555-0141', 'NY', 'NY-DEMO-1041', 'Lots of Con Ed make-ready work. Quick to quote, usually within a week.'],
+  ['Five Boroughs Electrical', 'Maria Lopez', '212-555-0162', 'NY', 'NY-DEMO-2207', 'Strong on garages and multifamily. Handles NYC DOB filings themselves.'],
+  ['Hudson Valley Power', 'Sean Doyle', '914-555-0119', 'NY', 'NY-DEMO-3318', 'Westchester and upstate. Good for big surface lots and trenching.'],
+  ['Garden State Electric', 'Raj Mehta', '201-555-0177', 'NJ,PA', 'NJ-DEMO-4410', 'PSE&G make-ready experience. Very competitive on Level 2.'],
+  ['Keystone Power Co.', 'Dan Kowalski', '215-555-0133', 'PA,NJ', 'PA-DEMO-5523', 'Philadelphia area. Does DC fast installs, higher prices but solid.'],
+  ['Pine Barrens Electric', 'Lisa Romano', '609-555-0158', 'NJ', 'NJ-DEMO-6634', 'South Jersey and the shore. Hotels and retail.'],
+  ['Three Rivers Electric', 'Greg Novak', '412-555-0124', 'PA', 'PA-DEMO-7745', 'Pittsburgh and western PA. Good with older buildings.'],
+  ['Shoreline Electrical', 'Kate Murphy', '203-555-0150', 'CT,RI,MA', 'CT-DEMO-8856', 'Eversource and UI programs. Reliable on schedule.'],
+  ['Nutmeg Electrical Services', 'Paul Santos', '860-555-0167', 'CT,RI', 'CT-DEMO-9967', 'Hartford area. Workplace and municipal lots.'],
+  ['Ocean State Electric', 'Jenna Costa', '401-555-0139', 'RI,MA,CT', 'RI-DEMO-1078', 'Rhode Island Energy jobs. Small crew, careful work.'],
+  ['Bay State Power Contractors', 'Mark Sullivan', '617-555-0182', 'MA,RI', 'MA-DEMO-2189', 'Boston metro. National Grid and Eversource make-ready.'],
+  ['Lone Star Electric', 'Carlos Vega', '512-555-0108', 'TX', 'TX-DEMO-3290', 'Austin and central Texas. Our go-to for Level 2.'],
+  ['Bluebonnet Electrical', 'Amy Nguyen', '214-555-0126', 'TX,AR,NM', 'TX-DEMO-4301', 'Dallas based, travels to Arkansas and New Mexico.'],
+  ['Gulf Coast Power Pros', 'Ray Thibodeaux', '713-555-0171', 'TX,FL,GA', 'TX-DEMO-5412', 'Houston and the Gulf coast. Big DC fast and fleet depots.'],
+  ['Natural State Electric', 'Tom Whitfield', '501-555-0115', 'AR,TX', 'AR-DEMO-6523', 'Little Rock and northwest Arkansas.'],
+  ['Ozark Electrical Contractors', 'Holly Price', '479-555-0148', 'AR', 'AR-DEMO-7634', 'Fayetteville and Bentonville. Retail and travel centers.'],
+  ['Rio Grande Electric', 'Diego Martinez', '505-555-0193', 'NM,TX', 'NM-DEMO-8745', 'Albuquerque and El Paso. PNM interconnection experience.'],
+  ['Land of Enchantment Electrical', 'Sara Begay', '575-555-0121', 'NM', 'NM-DEMO-9856', 'Santa Fe and Las Cruces. Hotels and tourism sites.'],
+  ['Sunshine State Electric', 'Luis Herrera', '305-555-0174', 'FL', 'FL-DEMO-1967', 'Miami and Fort Lauderdale. FPL programs.'],
+  ['Coastal Current Electrical', 'Erin Walsh', '904-555-0136', 'FL,GA', 'FL-DEMO-2078', 'Jacksonville to Savannah. Hurricane-rated installs.'],
+  ['Peach State Power', 'Marcus Reid', '404-555-0159', 'GA', 'GA-DEMO-3189', 'Atlanta metro. Georgia Power make-ready.'],
+  ['Windy City Electric', 'Mike Kowal', '312-555-0187', 'IL,OH', 'IL-DEMO-4290', 'Chicago. ComEd rebates, union crew.'],
+  ['Prairie Electrical Contractors', 'Beth Larson', '630-555-0145', 'IL', 'IL-DEMO-5301', 'Western suburbs. Grocery and retail chains.'],
+  ['Lakefront Electrical Services', 'Andre Wallace', '773-555-0112', 'IL', 'IL-DEMO-6412', 'North side and north shore. Multifamily garages.'],
+  ['Buckeye Electric Co.', 'Kelly Turner', '614-555-0166', 'OH', 'OH-DEMO-7523', 'Columbus. AEP Ohio jobs and fleet yards.'],
+  ['Cuyahoga Power Contractors', 'Nick Petrovic', '216-555-0198', 'OH', 'OH-DEMO-8634', 'Cleveland and Akron. Municipal and hospital campuses.'],
+];
+const cid = {};
+{
+  const find = db.prepare('SELECT id FROM contractors WHERE company = ?');
+  const insC = db.prepare('INSERT INTO contractors (company, contact_name, phone, email, states, license, notes, updated_by) VALUES (?,?,?,?,?,?,?,?)');
+  db.transaction(() => ELECTRICIANS.forEach(([company, contact, phone, states, license, notes]) => {
+    cid[company] = find.get(company)?.id ?? (seedElectricians
+      ? insC.run(company, contact, phone, `${contact.split(' ')[0].toLowerCase()}@${company.toLowerCase().replace(/[^a-z]+/g, '')}.example`, states, license, notes, admin).lastInsertRowid
+      : null);
+  }))();
+}
+
 const insP = db.prepare(`INSERT INTO projects (name, customer_name, contact_name, contact_email, contact_phone, address, city, state, zip, site_type,
   charger_type, charger_count, power_kw, estimated_value, phase, status, priority, owner_id, stage_entered_at, created_at, hold_reason, target_live_date,
   lat, lng, geocoded_at, utility_id, utility_company, property_owner, tax_credit_id, tax_credit_eligible)
@@ -263,18 +305,6 @@ if (seedPipeline) db.transaction(() => {
     insMsg.run(pi, m?.id ?? null, m?.name ?? null, siteOwner(pi), body, ago);
   });
 
-  // electricians who walk the sites and quote (fictional demo companies)
-  const ELECTRICIANS = [
-    ['Empire Electric Co.', 'Tony Russo', '718-555-0141', 'NY'], ['Five Boroughs Electrical', 'Maria Lopez', '212-555-0162', 'NY'], ['Hudson Valley Power', 'Sean Doyle', '914-555-0119', 'NY'],
-    ['Garden State Electric', 'Raj Mehta', '201-555-0177', 'NJ,PA'], ['Shoreline Electrical', 'Kate Murphy', '203-555-0150', 'CT,RI,MA'], ['Keystone Power Co.', 'Dan Kowalski', '215-555-0133', 'PA,NJ'],
-    ['Lone Star Electric', 'Carlos Vega', '512-555-0108', 'TX'], ['Bluebonnet Electrical', 'Amy Nguyen', '214-555-0126', 'TX,AR,NM'], ['Gulf Coast Power Pros', 'Ray Thibodeaux', '713-555-0171', 'TX,FL,GA'],
-    ['Windy City Electric', 'Mike Kowal', '312-555-0187', 'IL,OH'], ['Prairie Electrical Contractors', 'Beth Larson', '630-555-0145', 'IL'],
-  ];
-  const cid = {};
-  const insC = db.prepare('INSERT INTO contractors (company, contact_name, phone, email, states, notes, updated_by) VALUES (?,?,?,?,?,?,?)');
-  ELECTRICIANS.forEach(([company, contact, phone, states]) => {
-    cid[company] = insC.run(company, contact, phone, `${contact.split(' ')[0].toLowerCase()}@${company.toLowerCase().replace(/[^a-z]+/g, '')}.example`, states, 'Demo electrician.', admin).lastInsertRowid;
-  });
   // quotes: [project, company, status, amount, days ago received]
   const insQ = db.prepare(`INSERT INTO quotes (project_id, contractor_id, status, amount, scope, received_on, created_by)
     VALUES (?,?,?,?,?, CASE WHEN ? IS NULL THEN NULL ELSE date('now', ?) END, ?)`);
@@ -284,7 +314,7 @@ if (seedPipeline) db.transaction(() => {
     [5, 'Lone Star Electric', 'walk_booked', null, null], [5, 'Bluebonnet Electrical', 'requested', null, null],
     [1, 'Lone Star Electric', 'selected', 46500, 70], [1, 'Bluebonnet Electrical', 'declined', 51200, 69],
   ].forEach(([pi, co, status, amount, ago]) => {
-    if (!db.prepare('SELECT 1 FROM projects WHERE id = ?').get(pi)) return;
+    if (!db.prepare('SELECT 1 FROM projects WHERE id = ?').get(pi) || !cid[co]) return;
     insQ.run(pi, cid[co], status, amount, amount ? 'Level 2 chargers, new panel and conduit run (demo quote)' : null, ago ?? null, `-${ago ?? 0} days`, admin);
     if (status === 'selected') db.prepare('UPDATE projects SET contractor_id = ? WHERE id = ?').run(cid[co], pi);
   });
@@ -309,7 +339,7 @@ if (seedPipeline) db.transaction(() => {
     const loc = [p.address, p.city, p.state, p.zip].filter(Boolean).join(', ');
     const eid = insEv.run(pi, mid, kind, `${d >= 0 ? '+' : ''}${d} days`, t1, `${d + extra >= 0 ? '+' : ''}${d + extra} days`, t2, loc, notes, status, admin).lastInsertRowid;
     insEP.run(eid, p.owner_id || admin);
-    if (quoteElec[pi] && kind !== 'meeting') db.prepare('UPDATE events SET contractor_id = ? WHERE id = ?').run(cid[quoteElec[pi]], eid);
+    if (quoteElec[pi] && cid[quoteElec[pi]] && kind !== 'meeting') db.prepare('UPDATE events SET contractor_id = ? WHERE id = ?').run(cid[quoteElec[pi]], eid);
     if (kind === 'meeting') insEP.run(eid, admin);
   });
 
@@ -340,3 +370,4 @@ if (seedDiligence) db.transaction(() => {
 if (seedPipeline) console.log(`Seeded ${projects.length} demo projects and staff users (password: changeme123).`);
 if (seedDiligence) console.log(`Added ${diligence.length} demo properties to Due Diligence.`);
 if (seedDirectory) console.log(`Added ${REBATES.length} sample rebates (marked "needs checking") and ${UTILITIES.length} utilities.`);
+if (seedElectricians) console.log(`Added ${ELECTRICIANS.length} made-up electricians (at least 3 per state).`);
