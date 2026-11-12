@@ -140,6 +140,27 @@ CREATE INDEX IF NOT EXISTS idx_activity_project ON activity(project_id, created_
 CREATE INDEX IF NOT EXISTS idx_history_project ON stage_history(project_id, changed_at);
 `);
 
+// ---------- migrations: add columns to existing databases ----------
+// Projects start in "diligence" (Due Diligence tab) and move to "pipeline" once checks are done.
+// Existing projects default to "pipeline" so nothing already in the funnel disappears.
+const PROJECT_MIGRATIONS = {
+  phase: "TEXT NOT NULL DEFAULT 'pipeline'",
+  property_owner: 'TEXT',
+  property_owner_contact: 'TEXT',
+  rebate_program: 'TEXT',
+  rebate_amount: 'REAL',
+  utility_company: 'TEXT',
+  diligence_notes: 'TEXT',
+  diligence_completed_at: 'TEXT',
+};
+{
+  const have = new Set(db.prepare('PRAGMA table_info(projects)').all().map((c) => c.name));
+  for (const [col, def] of Object.entries(PROJECT_MIGRATIONS)) {
+    if (!have.has(col)) db.exec(`ALTER TABLE projects ADD COLUMN ${col} ${def}`);
+  }
+  db.exec('CREATE INDEX IF NOT EXISTS idx_projects_phase ON projects(phase, state)');
+}
+
 // Default EV charge-point deployment funnel
 const DEFAULT_STAGES = [
   ['Lead', '#94a3b8', 7, 0],

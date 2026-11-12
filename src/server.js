@@ -143,11 +143,12 @@ app.get('/api/dashboard', (req, res) => {
     FROM stages s LEFT JOIN projects p ON p.stage_id = s.id AND p.status IN ('active','on_hold','blocked','won')
     GROUP BY s.id ORDER BY s.position`).all();
   const totals = db.prepare(`SELECT
-      COUNT(*) FILTER (WHERE status IN ('active','on_hold','blocked')) AS open_projects,
+      COUNT(*) FILTER (WHERE phase = 'diligence' AND status IN ('active','on_hold','blocked')) AS in_diligence,
+      COUNT(*) FILTER (WHERE phase = 'pipeline' AND status IN ('active','on_hold','blocked')) AS open_projects,
       COUNT(*) FILTER (WHERE status = 'on_hold') AS on_hold,
       COUNT(*) FILTER (WHERE status = 'blocked') AS blocked,
-      COALESCE(SUM(estimated_value) FILTER (WHERE status IN ('active','on_hold','blocked')),0) AS pipeline_value,
-      COALESCE(SUM(charger_count) FILTER (WHERE status IN ('active','on_hold','blocked')),0) AS pipeline_chargers
+      COALESCE(SUM(estimated_value) FILTER (WHERE phase = 'pipeline' AND status IN ('active','on_hold','blocked')),0) AS pipeline_value,
+      COALESCE(SUM(charger_count) FILTER (WHERE phase = 'pipeline' AND status IN ('active','on_hold','blocked')),0) AS pipeline_chargers
     FROM projects`).get();
   totals.live_chargers = db.prepare(`SELECT COALESCE(SUM(p.charger_count),0) c FROM projects p JOIN stages s ON s.id=p.stage_id WHERE s.is_closed=1 AND p.status NOT IN ('lost','cancelled')`).get().c;
   totals.open_tickets = db.prepare("SELECT COUNT(*) c FROM tickets WHERE status NOT IN ('resolved','closed')").get().c;
@@ -175,7 +176,11 @@ app.get('/api/dashboard', (req, res) => {
 // ---------- projects ----------
 const PROJECT_FIELDS = ['name', 'customer_name', 'contact_name', 'contact_email', 'contact_phone', 'address', 'city', 'state', 'zip',
   'site_type', 'charger_type', 'charger_count', 'power_kw', 'estimated_value', 'status', 'priority', 'owner_id', 'target_live_date',
-  'hold_reason', 'description'];
+  'hold_reason', 'description',
+  'property_owner', 'property_owner_contact', 'rebate_program', 'rebate_amount', 'utility_company', 'diligence_notes'];
+// What must be filled in before a property can leave Due Diligence
+const DILIGENCE_REQUIRED = { property_owner: 'Property owner', rebate_program: 'Rebate the site qualifies for', utility_company: 'Utility company' };
+const diligenceMissing = (p) => Object.entries(DILIGENCE_REQUIRED).filter(([k]) => !String(p[k] ?? '').trim()).map(([, v]) => v);
 
 const PROJECT_SELECT = `SELECT p.*, s.name AS stage_name, s.color AS stage_color, s.stale_days, s.position AS stage_position,
     u.name AS owner_name,
@@ -187,17 +192,21 @@ const PROJECT_SELECT = `SELECT p.*, s.name AS stage_name, s.color AS stage_color
 function validateProject(data) {
   if (data.status && !ENUMS.projectStatus.includes(data.status)) bad('Invalid status');
   if (data.priority && !ENUMS.priority.includes(data.priority)) bad('Invalid priority');
-  for (const k of ['charger_count', 'power_kw', 'estimated_value', 'owner_id']) {
+  if (data.state != null) data.state = String(data.state).trim().toUpperCase() || null;
+  for (const k of ['charger_count', 'power_kw', 'estimated_value', 'owner_id', 'rebate_amount']) {
     if (data[k] != null) { const n = Number(data[k]); if (Number.isNaN(n)) bad(`${k} must be a number`); data[k] = n; }
   }
 }
 
 app.get('/api/projects', (req, res) => {
   const where = []; const args = [];
-  const { q, stage_id, status, owner_id, priority } = req.query;
+  const { q, stage_id, status, owner_id, priority, phase, state } = req.query;
+  if (phase) { where.push('p.phase = ?'); args.push(phase); }
+  if (state === 'none') where.push("(p.state IS NULL OR p.state = '')");
+  else if (state) { where.push('p.state = ?'); args.push(state); }
   if (q) {
-    where.push('(p.name LIKE ? OR p.code LIKE ? OR p.customer_name LIKE ? OR p.city LIKE ? OR p.address LIKE ? OR p.contact_name LIKE ?)');
-    const like = `%${q}%`; args.push(like, like, like, like, like, like);
+    where.push('(p.name LIKE ? OR p.code LIKE ? OR p.customer_name LIKE ? OR p.city LIKE ? OR p.address LIKE ? OR p.contact_name LIKE ? OR p.property_owner LIKE ? OR p.utility_company LIKE ?)');
+    const like = `%${q}%`; args.push(like, like, like, like, like, like, like, like);
   }
   if (stage_id) { where.push('p.stage_id = ?'); args.push(stage_id); }
   if (status === 'open') where.push("p.status IN ('active','on_hold','blocked')");
@@ -210,9 +219,10 @@ app.get('/api/projects', (req, res) => {
 
 app.get('/api/projects.csv', (req, res) => {
   const rows = db.prepare(`${PROJECT_SELECT} ORDER BY p.id`).all();
-  const cols = ['code', 'name', 'customer_name', 'contact_name', 'contact_email', 'contact_phone', 'address', 'city', 'state', 'zip',
+  const cols = ['code', 'phase', 'name', 'customer_name', 'contact_name', 'contact_email', 'contact_phone', 'address', 'city', 'state', 'zip',
     'site_type', 'charger_type', 'charger_count', 'power_kw', 'estimated_value', 'stage_name', 'days_in_stage', 'status', 'hold_reason',
-    'priority', 'owner_name', 'target_live_date', 'open_tickets', 'created_at', 'updated_at'];
+    'priority', 'owner_name', 'target_live_date', 'open_tickets', 'property_owner', 'property_owner_contact', 'rebate_program',
+    'rebate_amount', 'utility_company', 'diligence_completed_at', 'created_at', 'updated_at'];
   const esc = (v) => {
     if (v == null) return '';
     let s = String(v);
@@ -228,16 +238,21 @@ app.post('/api/projects', wrap((req, res) => {
   const data = pick(req.body || {}, PROJECT_FIELDS);
   if (!data.name) bad('Project name is required');
   validateProject(data);
-  const stageId = Number(req.body.stage_id) || getStages()[0].id;
-  if (!db.prepare('SELECT 1 FROM stages WHERE id = ?').get(stageId)) bad('Invalid stage');
+  // New properties go to Due Diligence unless the caller explicitly creates a pipeline project.
+  const phase = req.body.phase === 'pipeline' ? 'pipeline' : 'diligence';
+  let stageId = null;
+  if (phase === 'pipeline') {
+    stageId = Number(req.body.stage_id) || getStages()[0].id;
+    if (!db.prepare('SELECT 1 FROM stages WHERE id = ?').get(stageId)) bad('Invalid stage');
+  }
   const id = db.transaction(() => {
-    const cols = Object.keys(data);
-    const info = db.prepare(`INSERT INTO projects (${[...cols, 'stage_id'].join(',')}) VALUES (${[...cols, 'stage_id'].map(() => '?').join(',')})`)
-      .run(...cols.map((c) => data[c]), stageId);
+    const cols = [...Object.keys(data), 'stage_id', 'phase'];
+    const vals = [...Object.keys(data).map((c) => data[c]), stageId, phase];
+    const info = db.prepare(`INSERT INTO projects (${cols.join(',')}) VALUES (${cols.map(() => '?').join(',')})`).run(...vals);
     const pid = info.lastInsertRowid;
     db.prepare('UPDATE projects SET code = ? WHERE id = ?').run(`EV-${String(pid).padStart(4, '0')}`, pid);
-    db.prepare('INSERT INTO stage_history (project_id, from_stage_id, to_stage_id, user_id, note) VALUES (?,?,?,?,?)').run(pid, null, stageId, req.user.id, 'Project created');
-    logActivity(pid, req.user.id, 'project_created', data.name);
+    if (stageId) db.prepare('INSERT INTO stage_history (project_id, from_stage_id, to_stage_id, user_id, note) VALUES (?,?,?,?,?)').run(pid, null, stageId, req.user.id, 'Project created');
+    logActivity(pid, req.user.id, 'project_created', phase === 'diligence' ? `${data.name} (added to due diligence)` : data.name);
     return pid;
   })();
   res.status(201).json(db.prepare(`${PROJECT_SELECT} WHERE p.id = ?`).get(id));
@@ -270,6 +285,7 @@ app.patch('/api/projects/:id', wrap((req, res) => {
 
 app.post('/api/projects/:id/stage', wrap((req, res) => {
   const p = db.prepare('SELECT * FROM projects WHERE id = ?').get(req.params.id) || notFound('Project not found');
+  if (p.phase === 'diligence') bad('Finish due diligence first, then use "Move to pipeline"');
   const to = db.prepare('SELECT * FROM stages WHERE id = ?').get(Number(req.body?.stage_id)) || bad('Invalid stage');
   if (to.id !== p.stage_id) {
     const note = req.body?.note ? String(req.body.note).slice(0, 2000) : null;
@@ -281,6 +297,25 @@ app.post('/api/projects/:id/stage', wrap((req, res) => {
       logActivity(p.id, req.user.id, 'stage_changed', `${from?.name || '—'} → ${to.name}${note ? `: ${note}` : ''}`);
     })();
   }
+  res.json(db.prepare(`${PROJECT_SELECT} WHERE p.id = ?`).get(p.id));
+}));
+
+// Due diligence done: move the property into the pipeline at the stage the user picks
+app.post('/api/projects/:id/promote', wrap((req, res) => {
+  const p = db.prepare('SELECT * FROM projects WHERE id = ?').get(req.params.id) || notFound('Project not found');
+  if (p.phase !== 'diligence') bad('This project is already in the pipeline');
+  const missing = diligenceMissing(p);
+  if (missing.length) bad(`Due diligence isn't finished. Still missing: ${missing.join(', ')}`);
+  const to = db.prepare('SELECT * FROM stages WHERE id = ?').get(Number(req.body?.stage_id)) || bad('Pick a pipeline stage');
+  const note = req.body?.note ? String(req.body.note).slice(0, 2000) : null;
+  db.transaction(() => {
+    const t = now();
+    db.prepare("UPDATE projects SET phase = 'pipeline', stage_id = ?, stage_entered_at = ?, diligence_completed_at = ?, updated_at = ? WHERE id = ?")
+      .run(to.id, t, t, t, p.id);
+    db.prepare('INSERT INTO stage_history (project_id, from_stage_id, to_stage_id, user_id, note, changed_at) VALUES (?,?,?,?,?,?)')
+      .run(p.id, null, to.id, req.user.id, `Due diligence complete${note ? `: ${note}` : ''}`, t);
+    logActivity(p.id, req.user.id, 'moved_to_pipeline', `Due diligence → ${to.name}${note ? `: ${note}` : ''}`);
+  })();
   res.json(db.prepare(`${PROJECT_SELECT} WHERE p.id = ?`).get(p.id));
 }));
 

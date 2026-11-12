@@ -6,7 +6,8 @@ Only Evium staff sign in. Customers are stored as contacts on each project and n
 ## Features
 
 - **Projects (sites)**: customer and contact details, site address, site type, charger type and port count, kW, estimated value, owner, priority, target go-live date. Each project gets a code like `EV-0001`.
-- **Funnel / pipeline**: a Kanban board where you drag a project from one stage to the next. Each move can carry a note. The default stages cover an EV deployment:
+- **Due Diligence**: new properties start on the Due Diligence tab. Each one records the **property owner**, the **rebate** the site qualifies for and the **utility company**. Once all three are filled in, **Move to pipeline** sends it into the funnel at whichever stage you pick.
+- **Funnel / pipeline**: a Kanban board, grouped into one section per US state (click a state chip to show only that state), where you drag a project from one stage to the next. Each move can carry a note. The default stages cover an EV deployment:
   Lead → Qualified → Site Survey → Proposal Sent → Contract Signed → Design & Engineering → Permitting → Utility / Make-Ready → Installation → Commissioning → Live / Operational.
   Admins can rename, reorder, add or remove stages.
 - **Where each project is holding**: every stage has an SLA in days. The app shows how many days a project has been in its current stage, flags projects that are over the SLA, and keeps a full stage timeline showing how long the project spent in each stage.

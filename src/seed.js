@@ -2,8 +2,10 @@
 // Loads demo data so you can explore the CRM. Usage: npm run seed
 const { db, hashPassword } = require('./db');
 
-if (db.prepare('SELECT COUNT(*) c FROM projects').get().c > 0) {
-  console.log('Projects already exist – skipping demo seed.');
+const seedPipeline = db.prepare('SELECT COUNT(*) c FROM projects').get().c === 0;
+const seedDiligence = db.prepare("SELECT COUNT(*) c FROM projects WHERE phase = 'diligence'").get().c === 0;
+if (!seedPipeline && !seedDiligence) {
+  console.log('Demo data already loaded – nothing to add.');
   process.exit(0);
 }
 
@@ -32,6 +34,16 @@ const projects = [
   ['Midtown Parking Structure', 'Midtown Parking Co', 'Kevin Lee', 'kevin@midtown.example', '555-0109', '77 5th St', 'Houston', 'TX', '77003', 'parking', 'L2', 24, 173, 140000, 'Lead', 'active', 'medium', 2],
   ['Greenway Grocers #14', 'Greenway Grocers', 'Sofia Alvarez', 'sofia@greenway.example', '555-0110', '1400 Greenway Pkwy', 'Plano', 'TX', '75024', 'retail', 'DCFC', 4, 600, 420000, 'Qualified', 'active', 'high', 15],
   ['Westfield Office Park', 'Westfield REIT', 'Brian Cole', 'bcole@westfield.example', '555-0111', '2 Westfield Ct', 'Frisco', 'TX', '75034', 'workplace', 'L2', 14, 101, 76000, 'Design & Engineering', 'active', 'medium', 26],
+  ['Bayview Transit Hub', 'Bayview Transit Authority', 'Grace Park', 'gpark@bayview.example', '555-0112', '1 Harbor Dr', 'San Diego', 'CA', '92101', 'municipal', 'DCFC', 10, 1500, 1020000, 'Permitting', 'active', 'high', 18],
+  ['Palm Grove Shopping Center', 'Palm Grove Retail', 'Marco Silva', 'msilva@palmgrove.example', '555-0113', '5500 Palm Ave', 'Orlando', 'FL', '32801', 'retail', 'L2 + DCFC', 12, 480, 365000, 'Proposal Sent', 'active', 'medium', 6],
+];
+
+// Properties still in due diligence: [name, address, city, state, zip, site type, property owner, owner contact, rebate, rebate $, utility, days ago]
+const diligence = [
+  ['Desert Ridge Marketplace', '21001 N Tatum Blvd', 'Phoenix', 'AZ', '85050', 'retail', 'Desert Ridge Holdings LLC', '602-555-0140', 'SRP Business EV Rebate', 45000, 'Salt River Project (SRP)', 5],
+  ['Coral Bay Apartments', '900 Biscayne Blvd', 'Miami', 'FL', '33132', 'multifamily', 'Coral Bay Residential', 'leasing@coralbay.example', null, null, 'Florida Power & Light (FPL)', 3],
+  ['Sacramento Logistics Yard', '4800 Power Inn Rd', 'Sacramento', 'CA', '95826', 'fleet', null, null, 'HVIP + SMUD Fleet Electrification', 250000, 'SMUD', 9],
+  ['Hill Country Inn', '250 Main St', 'Fredericksburg', 'TX', '78624', 'hospitality', 'Hill Country Hospitality', '830-555-0177', 'None', null, 'Central Texas Electric Co-op', 12],
 ];
 
 const insP = db.prepare(`INSERT INTO projects (name, customer_name, contact_name, contact_email, contact_phone, address, city, state, zip, site_type,
@@ -41,7 +53,7 @@ const insH = db.prepare('INSERT INTO stage_history (project_id, from_stage_id, t
 const insT = db.prepare('INSERT INTO tickets (project_id, title, type, priority, status, assignee_id, due_date, created_by, description) VALUES (?,?,?,?,?,?, date(\'now\', ?),?,?)');
 const insA = db.prepare('INSERT INTO activity (project_id, user_id, action, detail) VALUES (?,?,?,?)');
 
-db.transaction(() => {
+if (seedPipeline) db.transaction(() => {
   projects.forEach((p, i) => {
     const [name, cust, cn, ce, cp, addr, city, state, zip, site, ctype, count, kw, value, stageName, status, prio, daysIn] = p;
     const stageId = st(stageName);
@@ -81,4 +93,17 @@ db.transaction(() => {
   });
 })();
 
-console.log(`Seeded ${projects.length} demo projects and staff users (password: changeme123).`);
+const insD = db.prepare(`INSERT INTO projects (name, address, city, state, zip, site_type, property_owner, property_owner_contact, rebate_program,
+  rebate_amount, utility_company, phase, status, priority, owner_id, stage_entered_at, created_at)
+  VALUES (?,?,?,?,?,?,?,?,?,?,?, 'diligence', 'active', 'medium', ?, datetime('now', ?), datetime('now', ?))`);
+if (seedDiligence) db.transaction(() => {
+  diligence.forEach((d, i) => {
+    const [name, addr, city, state, zip, site, owner, contact, rebate, rebateAmt, utility, daysAgo] = d;
+    const pid = insD.run(name, addr, city, state, zip, site, owner, contact, rebate, rebateAmt, utility, userIds[i % userIds.length], `-${daysAgo} days`, `-${daysAgo} days`).lastInsertRowid;
+    db.prepare('UPDATE projects SET code = ? WHERE id = ?').run(`EV-${String(pid).padStart(4, '0')}`, pid);
+    insA.run(pid, userIds[i % userIds.length], 'project_created', `${name} (added to due diligence)`);
+  });
+})();
+
+if (seedPipeline) console.log(`Seeded ${projects.length} demo projects and staff users (password: changeme123).`);
+if (seedDiligence) console.log(`Added ${diligence.length} demo properties to Due Diligence.`);

@@ -36,6 +36,21 @@ const options = (list, sel, { blank, fmt = label } = {}) =>
   list.map((v) => { const [val, txt] = Array.isArray(v) ? v : [v, fmt(v)]; return `<option value="${esc(val)}" ${String(val) === String(sel ?? '') ? 'selected' : ''}>${esc(txt)}</option>`; }).join('');
 const userOptions = (sel, blank = 'Unassigned') => options(S.meta.users.filter((u) => u.active || String(u.id) === String(sel)).map((u) => [u.id, u.name]), sel, { blank });
 const stageOptions = (sel) => options(S.meta.stages.map((s) => [s.id, s.name]), sel);
+const US_STATES = [['AL', 'Alabama'], ['AK', 'Alaska'], ['AZ', 'Arizona'], ['AR', 'Arkansas'], ['CA', 'California'], ['CO', 'Colorado'],
+  ['CT', 'Connecticut'], ['DE', 'Delaware'], ['DC', 'District of Columbia'], ['FL', 'Florida'], ['GA', 'Georgia'], ['HI', 'Hawaii'], ['ID', 'Idaho'],
+  ['IL', 'Illinois'], ['IN', 'Indiana'], ['IA', 'Iowa'], ['KS', 'Kansas'], ['KY', 'Kentucky'], ['LA', 'Louisiana'], ['ME', 'Maine'], ['MD', 'Maryland'],
+  ['MA', 'Massachusetts'], ['MI', 'Michigan'], ['MN', 'Minnesota'], ['MS', 'Mississippi'], ['MO', 'Missouri'], ['MT', 'Montana'], ['NE', 'Nebraska'],
+  ['NV', 'Nevada'], ['NH', 'New Hampshire'], ['NJ', 'New Jersey'], ['NM', 'New Mexico'], ['NY', 'New York'], ['NC', 'North Carolina'],
+  ['ND', 'North Dakota'], ['OH', 'Ohio'], ['OK', 'Oklahoma'], ['OR', 'Oregon'], ['PA', 'Pennsylvania'], ['PR', 'Puerto Rico'], ['RI', 'Rhode Island'],
+  ['SC', 'South Carolina'], ['SD', 'South Dakota'], ['TN', 'Tennessee'], ['TX', 'Texas'], ['UT', 'Utah'], ['VT', 'Vermont'], ['VA', 'Virginia'],
+  ['WA', 'Washington'], ['WV', 'West Virginia'], ['WI', 'Wisconsin'], ['WY', 'Wyoming']];
+const stateName = (code) => (US_STATES.find(([c]) => c === String(code || '').toUpperCase()) || [])[1] || code || 'No state';
+// keep a non-standard saved value selectable so editing never silently drops it
+const stateOptions = (sel) => options(sel && !US_STATES.some(([c]) => c === sel) ? [[sel, sel], ...US_STATES] : US_STATES, sel, { blank: '—' });
+// Due diligence checklist: these must be filled before a property can move to the pipeline
+const DD_CHECKS = [['property_owner', 'Property owner'], ['rebate_program', 'Rebate'], ['utility_company', 'Utility company']];
+const ddMissing = (p) => DD_CHECKS.filter(([k]) => !String(p[k] ?? '').trim());
+const phaseBadge = () => badge('ph-dd', 'Due diligence');
 const isStale = (p) => p.days_in_stage > p.stale_days && ['active', 'on_hold', 'blocked'].includes(p.status);
 
 async function api(method, url, body) {
@@ -133,6 +148,7 @@ async function route() {
   if (!$('#modal').classList.contains('hidden')) { modalClose = null; closeModal(); }
   try {
     if (page === 'dashboard') await renderDashboard();
+    else if (page === 'diligence') await renderDiligence();
     else if (page === 'pipeline') await renderPipeline();
     else if (page === 'projects' && id) await renderProject(id);
     else if (page === 'projects') await renderProjects();
@@ -151,7 +167,8 @@ async function renderDashboard() {
   view.innerHTML = `
     <div class="page-head"><h1>Dashboard</h1><div class="actions"><button class="btn primary" id="newProject">+ New project</button></div></div>
     <div class="kpis">
-      <div class="card kpi"><div class="l">Open projects</div><div class="v">${num(t.open_projects)}</div></div>
+      <a class="card kpi" href="#/diligence"><div class="l">In due diligence</div><div class="v">${num(t.in_diligence)}</div></a>
+      <div class="card kpi"><div class="l">Open in pipeline</div><div class="v">${num(t.open_projects)}</div></div>
       <div class="card kpi"><div class="l">Pipeline value</div><div class="v">${money(t.pipeline_value)}</div></div>
       <div class="card kpi"><div class="l">Ports in pipeline</div><div class="v">${num(t.pipeline_chargers)}</div></div>
       <div class="card kpi"><div class="l">Ports live</div><div class="v">${num(t.live_chargers)}</div></div>
@@ -195,7 +212,7 @@ async function renderDashboard() {
 }
 
 function activityItem(a) {
-  const icons = { project_created: '🆕', stage_changed: '➡️', status_changed: '🚦', project_updated: '✏️', ticket_created: '🎫', ticket_updated: '🎫', ticket_deleted: '🗑️', documents_uploaded: '📎', document_deleted: '🗑️', note: '📝' };
+  const icons = { moved_to_pipeline: '✅', project_created: '🆕', stage_changed: '➡️', status_changed: '🚦', project_updated: '✏️', ticket_created: '🎫', ticket_updated: '🎫', ticket_deleted: '🗑️', documents_uploaded: '📎', document_deleted: '🗑️', note: '📝' };
   const proj = a.project_name ? ` <a href="#/projects/${a.project_id}">${esc(a.code)}</a>` : '';
   const body = a.action === 'note' ? `<div class="note">${esc(a.detail)}</div>` : `<span>${esc(a.detail || '')}</span>`;
   return `<div class="feed-item">${icons[a.action] || '•'} <b>${esc(a.user_name || 'System')}</b> <span class="muted">${esc(label(a.action))}</span>${proj}
@@ -206,35 +223,147 @@ function bindRowLinks(root = view) {
   $$('tr[data-href]', root).forEach((tr) => tr.addEventListener('click', (e) => { if (!e.target.closest('a,button,select,input')) location.hash = tr.dataset.href; }));
 }
 
-// ---------- pipeline (kanban) ----------
-async function renderPipeline() {
-  const params = new URLSearchParams({ status: qs().get('status') || 'open' });
-  if (qs().get('owner_id')) params.set('owner_id', qs().get('owner_id'));
-  const projects = await api('GET', `/api/projects?${params}`);
-  const by = {}; S.meta.stages.forEach((s) => (by[s.id] = []));
-  projects.forEach((p) => by[p.stage_id]?.push(p));
+// ---------- due diligence ----------
+async function renderDiligence() {
+  const q = qs();
+  const f = { q: q.get('q') || '', state: q.get('state') || '', status: q.get('status') ?? 'open' };
+  const params = new URLSearchParams({ phase: 'diligence', ...Object.fromEntries(Object.entries(f).filter(([, v]) => v)) });
+  const rows = await api('GET', `/api/projects?${params}`);
+  const ready = rows.filter((p) => !ddMissing(p).length).length;
   view.innerHTML = `
-    <div class="page-head"><h1>Pipeline</h1>
+    <div class="page-head"><h1>Due Diligence <span class="muted small">${rows.length}</span></h1>
+      <div class="actions"><button class="btn primary" id="newProperty">+ New property</button></div></div>
+    <p class="muted small" style="margin-top:-8px">New properties start here. Fill in the property owner, the rebate the site qualifies for and the utility company, then move it to the pipeline.
+      ${rows.length ? `<b>${ready} of ${rows.length}</b> ready to move.` : ''}</p>
+    <form class="filters" id="ddFilters">
+      <input type="search" name="q" placeholder="Search name, address, owner, utility…" value="${esc(f.q)}">
+      <select name="state">${options(US_STATES.map(([c, n]) => [c, `${c} · ${n}`]), f.state, { blank: 'All states' })}</select>
+      <select name="status">${options([['open', 'Open'], ...S.meta.enums.projectStatus.map((s) => [s, label(s)])], f.status, { blank: 'All statuses' })}</select>
+    </form>
+    <div class="table-wrap"><table><thead><tr><th>Property</th><th>State</th><th>Property owner</th><th>Rebate</th><th>Utility</th><th>Checklist</th><th>In due diligence</th><th></th></tr></thead>
+    <tbody>${rows.map((p) => {
+      const missing = ddMissing(p);
+      return `<tr class="clickable" data-href="#/projects/${p.id}">
+      <td><b>${esc(p.name)}</b><div class="muted small">${esc(p.code)}${p.address || p.city ? ` · ${esc([p.address, p.city].filter(Boolean).join(', '))}` : ''}</div></td>
+      <td>${p.state ? `<b>${esc(p.state)}</b>` : '<span class="muted">—</span>'}</td>
+      <td>${esc(p.property_owner || '—')}${p.property_owner_contact ? `<div class="muted small">${esc(p.property_owner_contact)}</div>` : ''}</td>
+      <td>${esc(p.rebate_program || '—')}${p.rebate_amount ? `<div class="muted small">${money(p.rebate_amount)}</div>` : ''}</td>
+      <td>${esc(p.utility_company || '—')}</td>
+      <td><div class="checks">${DD_CHECKS.map(([k, t]) => `<span class="chk ${String(p[k] ?? '').trim() ? 'ok' : ''}" title="${esc(t)}">${String(p[k] ?? '').trim() ? '✓' : '○'} ${esc(t)}</span>`).join('')}</div></td>
+      <td class="muted">${p.days_in_stage}d</td>
+      <td style="text-align:right">${missing.length
+        ? `<button class="btn sm" data-edit="${p.id}">Fill in details</button>`
+        : `<button class="btn sm primary" data-promote="${p.id}">Move to pipeline →</button>`}</td></tr>`;
+    }).join('') || '<tr><td colspan="8" class="empty">No properties in due diligence. Click <b>+ New property</b> to add one.</td></tr>'}</tbody></table></div>`;
+  const form = $('#ddFilters');
+  const apply = () => { const p = new URLSearchParams(); Object.entries(formData(form)).forEach(([k, v]) => p.set(k, v)); location.hash = `#/diligence?${p}`; };
+  $$('select', form).forEach((s) => (s.onchange = apply));
+  let t; $('input[name=q]', form).addEventListener('input', () => { clearTimeout(t); t = setTimeout(apply, 350); });
+  form.addEventListener('submit', (e) => { e.preventDefault(); apply(); });
+  $('#newProperty').onclick = () => projectForm(null, { phase: 'diligence' });
+  const byId = (id) => rows.find((x) => String(x.id) === id);
+  $$('[data-promote]', view).forEach((b) => (b.onclick = () => promoteModal(byId(b.dataset.promote), renderDiligence)));
+  $$('[data-edit]', view).forEach((b) => (b.onclick = () => projectForm(byId(b.dataset.edit))));
+  bindRowLinks();
+  const qi = $('input[name=q]', form); if (f.q) { qi.focus(); qi.setSelectionRange(f.q.length, f.q.length); }
+}
+
+function promoteModal(p, after) {
+  const missing = ddMissing(p);
+  if (missing.length) {
+    const card = openModal(`${modalHead('Due diligence not finished')}
+      <p><b>${esc(p.name)}</b> <span class="muted">(${esc(p.code)})</span> still needs:</p>
+      <ul>${missing.map(([, t]) => `<li>${esc(t)}</li>`).join('')}</ul>
+      <div class="modal-foot"><button type="button" class="btn" data-close>Cancel</button><button class="btn primary" id="fillIn">Fill in details</button></div>`);
+    $('#fillIn', card).onclick = () => { modalClose = null; closeModal(); projectForm(p); };
+    return;
+  }
+  const card = openModal(`${modalHead('Move to pipeline')}
+    <p><b>${esc(p.name)}</b> <span class="muted">(${esc(p.code)}${p.state ? ` · ${esc(stateName(p.state))}` : ''})</span></p>
+    <dl class="kv" style="margin-bottom:14px"><dt>Property owner</dt><dd>${esc(p.property_owner)}</dd>
+      <dt>Rebate</dt><dd>${esc(p.rebate_program)}${p.rebate_amount ? ` · ${money(p.rebate_amount)}` : ''}</dd>
+      <dt>Utility</dt><dd>${esc(p.utility_company)}</dd></dl>
+    ${p.state ? '' : '<p class="small" style="color:var(--warn)">No state is set, so it will show under "No state" in the pipeline. Edit the property to add one.</p>'}
+    <form class="grid">
+      <label>Pipeline stage to start in<select name="stage_id">${stageOptions(S.meta.stages[0]?.id)}</select></label>
+      <label>Note (optional)<textarea name="note" placeholder="e.g. Owner signed LOI, utility confirmed capacity"></textarea></label>
+      <div class="modal-foot"><button type="button" class="btn" data-close>Cancel</button><button class="btn primary">Move to pipeline</button></div>
+    </form>`);
+  $('form', card).addEventListener('submit', async (e) => {
+    e.preventDefault();
+    try {
+      const saved = await api('POST', `/api/projects/${p.id}/promote`, formData(e.target));
+      modalClose = null; closeModal(); toast(`${saved.code} moved to ${saved.stage_name}`); after?.();
+    } catch (err) { fail(err); }
+  });
+}
+
+// ---------- pipeline (kanban, one lane per US state) ----------
+const laneKey = 'evium.pipeline.collapsed';
+const getCollapsed = () => { try { return new Set(JSON.parse(localStorage.getItem(laneKey) || '[]')); } catch { return new Set(); } };
+const setCollapsed = (set) => { try { localStorage.setItem(laneKey, JSON.stringify([...set])); } catch { /* storage unavailable */ } };
+
+async function renderPipeline() {
+  const params = new URLSearchParams({ phase: 'pipeline', status: qs().get('status') || 'open' });
+  if (qs().get('owner_id')) params.set('owner_id', qs().get('owner_id'));
+  const stateSel = qs().get('state') || '';
+  const all = await api('GET', `/api/projects?${params}`);
+  const keyOf = (p) => (p.state || '').toUpperCase() || 'none';
+  const groups = {};
+  all.forEach((p) => (groups[keyOf(p)] ||= []).push(p));
+  const keys = Object.keys(groups).sort((a, b) => (a === 'none') - (b === 'none') || stateName(a).localeCompare(stateName(b)));
+  const shown = stateSel ? keys.filter((k) => k === stateSel) : keys;
+  const collapsed = getCollapsed();
+  const sum = (list, f) => list.reduce((a, p) => a + (p[f] || 0), 0);
+
+  const lane = (k) => {
+    const list = groups[k] || [];
+    const by = {}; S.meta.stages.forEach((s) => (by[s.id] = []));
+    list.forEach((p) => by[p.stage_id]?.push(p));
+    const isOpen = stateSel || !collapsed.has(k);
+    return `<section class="lane ${isOpen ? '' : 'collapsed'}" data-lane="${esc(k)}">
+      <button class="lane-head" type="button" data-toggle="${esc(k)}">
+        <span class="caret">${isOpen ? '▾' : '▸'}</span>
+        <span class="lane-title">${k === 'none' ? 'No state set' : `${esc(stateName(k))} <span class="muted">${esc(k)}</span>`}</span>
+        <span class="sub">${list.length} project${list.length === 1 ? '' : 's'} · ${num(sum(list, 'charger_count'))} ports · ${money(sum(list, 'estimated_value'))}</span>
+      </button>
+      ${isOpen ? `<div class="board lane-board">${S.meta.stages.map((s) => {
+        const cards = by[s.id] || [];
+        const value = sum(cards, 'estimated_value');
+        return `<div class="column ${cards.length ? '' : 'is-empty'}" data-stage="${s.id}" title="${esc(s.name)}">
+          <div class="column-head" style="border-color:${esc(s.color)}"><span>${esc(s.name)} <span class="sub">${cards.length}</span></span><span class="sub">${value ? money(value) : ''}</span></div>
+          <div class="column-body">${cards.map(pcard).join('')}</div></div>`;
+      }).join('')}</div>` : ''}
+    </section>`;
+  };
+
+  view.innerHTML = `
+    <div class="page-head"><h1>Pipeline <span class="muted small">${all.length}</span></h1>
       <div class="actions">
         <select id="pStatus">${options([['open', 'Open (active/hold/blocked)'], ['active', 'Active'], ['on_hold', 'On hold'], ['blocked', 'Blocked'], ['won', 'Won'], ['', 'All statuses']], params.get('status'))}</select>
         <select id="pOwner">${options(S.meta.users.map((u) => [u.id, u.name]), params.get('owner_id'), { blank: 'All owners' })}</select>
-        <button class="btn primary" id="newProject">+ New project</button>
+        <a class="btn" href="#/diligence">Due diligence →</a>
       </div></div>
-    <p class="muted small" style="margin-top:-8px">Drag a card to another column to move it through the funnel. Red edge = past the stage SLA; amber = on hold.</p>
-    <div class="board">${S.meta.stages.map((s) => {
-      const list = by[s.id] || [];
-      const value = list.reduce((a, p) => a + (p.estimated_value || 0), 0);
-      return `<div class="column" data-stage="${s.id}">
-        <div class="column-head" style="border-color:${esc(s.color)}"><span>${esc(s.name)} <span class="sub">${list.length}</span></span><span class="sub">${value ? money(value) : ''}</span></div>
-        <div class="column-body">${list.map(pcard).join('')}</div></div>`;
-    }).join('')}</div>`;
-  const reload = () => {
+    <div class="chips">
+      <button class="chip ${stateSel ? '' : 'active'}" data-state="">All states <span>${all.length}</span></button>
+      ${keys.map((k) => `<button class="chip ${stateSel === k ? 'active' : ''}" data-state="${esc(k)}" title="${esc(stateName(k))}">${k === 'none' ? 'No state' : esc(k)} <span>${groups[k].length}</span></button>`).join('')}
+    </div>
+    <p class="muted small">Grouped by state. Drag a card to another column to move it through the funnel. Red edge = past the stage SLA; amber = on hold or blocked. New properties are added in <a href="#/diligence">Due Diligence</a>.</p>
+    ${shown.map(lane).join('') || `<div class="card empty">${stateSel ? 'No projects in this state.' : 'No projects in the pipeline yet. Finish due diligence on a property to move it here.'}</div>`}`;
+
+  const go = (over = {}) => {
     const p = new URLSearchParams(); p.set('status', $('#pStatus').value);
     if ($('#pOwner').value) p.set('owner_id', $('#pOwner').value);
+    const st = 'state' in over ? over.state : stateSel; if (st) p.set('state', st);
     location.hash = `#/pipeline?${p}`;
   };
-  $('#pStatus').onchange = reload; $('#pOwner').onchange = reload;
-  $('#newProject').onclick = () => projectForm();
+  $('#pStatus').onchange = () => go(); $('#pOwner').onchange = () => go();
+  $$('.chip', view).forEach((c) => (c.onclick = () => go({ state: c.dataset.state })));
+  $$('[data-toggle]', view).forEach((b) => (b.onclick = () => {
+    if (stateSel) return; // a single selected state always stays open
+    const set = getCollapsed(); const k = b.dataset.toggle;
+    set.has(k) ? set.delete(k) : set.add(k); setCollapsed(set); renderPipeline();
+  }));
 
   let dragId = null;
   $$('.pcard', view).forEach((c) => {
@@ -246,7 +375,7 @@ async function renderPipeline() {
     col.addEventListener('dragleave', () => col.classList.remove('drop'));
     col.addEventListener('drop', (e) => {
       e.preventDefault(); col.classList.remove('drop');
-      const p = projects.find((x) => String(x.id) === dragId);
+      const p = all.find((x) => String(x.id) === dragId);
       if (p && String(p.stage_id) !== col.dataset.stage) stageModal(p, Number(col.dataset.stage), renderPipeline);
     });
   });
@@ -281,7 +410,7 @@ function stageModal(p, toStageId, after) {
 // ---------- projects list ----------
 async function renderProjects() {
   const q = qs();
-  const f = { q: q.get('q') || '', stage_id: q.get('stage_id') || '', status: q.get('status') ?? 'open', owner_id: q.get('owner_id') || '', priority: q.get('priority') || '' };
+  const f = { q: q.get('q') || '', phase: q.get('phase') || '', state: q.get('state') || '', stage_id: q.get('stage_id') || '', status: q.get('status') ?? 'open', owner_id: q.get('owner_id') || '', priority: q.get('priority') || '' };
   const params = new URLSearchParams(Object.entries(f).filter(([, v]) => v));
   const rows = await api('GET', `/api/projects?${params}`);
   view.innerHTML = `
@@ -289,6 +418,8 @@ async function renderProjects() {
       <div class="actions"><a class="btn" href="/api/projects.csv">Export CSV</a><button class="btn primary" id="newProject">+ New project</button></div></div>
     <form class="filters" id="filters">
       <input type="search" name="q" placeholder="Search name, code, customer, city…" value="${esc(f.q)}">
+      <select name="phase">${options([['diligence', 'Due diligence'], ['pipeline', 'Pipeline']], f.phase, { blank: 'Diligence + pipeline' })}</select>
+      <select name="state">${options(US_STATES.map(([c, n]) => [c, `${c} · ${n}`]), f.state, { blank: 'All states' })}</select>
       <select name="stage_id">${options(S.meta.stages.map((s) => [s.id, s.name]), f.stage_id, { blank: 'All stages' })}</select>
       <select name="status">${options([['open', 'Open'], ...S.meta.enums.projectStatus.map((s) => [s, label(s)])], f.status, { blank: 'All statuses' })}</select>
       <select name="owner_id">${options(S.meta.users.map((u) => [u.id, u.name]), f.owner_id, { blank: 'All owners' })}</select>
@@ -298,8 +429,8 @@ async function renderProjects() {
     <tbody>${rows.map((p) => `<tr class="clickable" data-href="#/projects/${p.id}">
       <td><b>${esc(p.name)}</b><div class="muted small">${esc(p.code)}${p.city ? ` · ${esc(p.city)}${p.state ? ', ' + esc(p.state) : ''}` : ''}</div></td>
       <td>${esc(p.customer_name || '—')}</td>
-      <td>${stageBadge(p.stage_name, p.stage_color)}</td>
-      <td class="${isStale(p) ? 'stale' : ''}">${p.days_in_stage}d</td>
+      <td>${p.phase === 'diligence' ? phaseBadge() : stageBadge(p.stage_name, p.stage_color)}</td>
+      <td class="${p.phase !== 'diligence' && isStale(p) ? 'stale' : ''}">${p.days_in_stage}d</td>
       <td>${statusBadge(p.status)}</td>
       <td>${p.charger_count ? `${p.charger_count} <span class="muted small">${esc(p.charger_type || '')}</span>` : '—'}</td>
       <td>${money(p.estimated_value)}</td>
@@ -316,16 +447,26 @@ async function renderProjects() {
   const qi = $('input[name=q]', form); if (f.q) { qi.focus(); qi.setSelectionRange(f.q.length, f.q.length); }
 }
 
-function projectForm(p = null) {
+function projectForm(p = null, { phase = 'diligence' } = {}) {
   const e = S.meta.enums; const v = p || { status: 'active', priority: 'medium', owner_id: S.me.id };
-  const card = openModal(`${modalHead(p ? `Edit ${esc(p.code)}` : 'New project')}
+  const isDD = p ? p.phase === 'diligence' : phase === 'diligence';
+  const startOpts = [['dd', 'Due diligence (recommended)'], ...S.meta.stages.map((s) => [s.id, `Pipeline: ${s.name}`])];
+  const ddSection = `<h3 class="full" style="margin:6px 0 0">Due diligence <span class="muted small" style="font-weight:500">— owner, rebate and utility are needed before moving to the pipeline</span></h3>
+      <label>Property owner${isDD ? ' *' : ''}<input name="property_owner" value="${esc(v.property_owner)}" placeholder="Who owns the property"></label>
+      <label>Owner contact<input name="property_owner_contact" value="${esc(v.property_owner_contact)}" placeholder="Phone or email"></label>
+      <label>Utility company${isDD ? ' *' : ''}<input name="utility_company" value="${esc(v.utility_company)}" placeholder="e.g. Austin Energy"></label>
+      <label>Rebate the site qualifies for${isDD ? ' *' : ''}<input name="rebate_program" value="${esc(v.rebate_program)}" placeholder="Program name, or &quot;None&quot;"></label>
+      <label>Rebate amount (USD)<input name="rebate_amount" type="number" min="0" step="any" value="${esc(v.rebate_amount)}"></label>
+      <label class="full">Due diligence notes<textarea name="diligence_notes" placeholder="Anything found while checking the site">${esc(v.diligence_notes)}</textarea></label>`;
+  const card = openModal(`${modalHead(p ? `Edit ${esc(p.code)}` : isDD ? 'New property' : 'New project')}
     <form class="form-grid">
       <label class="full">Project / site name *<input name="name" required value="${esc(v.name)}" placeholder="e.g. Riverside Plaza – Level 2 garage"></label>
-      ${p ? '' : `<label>Starting stage<select name="stage_id">${stageOptions(S.meta.stages[0]?.id)}</select></label>`}
+      ${p ? '' : `<label>Start in<select name="start">${options(startOpts, isDD ? 'dd' : S.meta.stages[0]?.id)}</select></label>`}
       <label>Status<select name="status">${options(e.projectStatus, v.status)}</select></label>
       <label>Priority<select name="priority">${options(e.priority, v.priority)}</select></label>
       <label>Owner<select name="owner_id">${userOptions(v.owner_id)}</select></label>
       <label class="full">Hold / blocker reason<input name="hold_reason" value="${esc(v.hold_reason)}" placeholder="Shown when status is on hold or blocked"></label>
+      ${isDD ? ddSection : ''}
       <h3 class="full" style="margin:6px 0 0">Customer (no login required)</h3>
       <label>Customer / company<input name="customer_name" value="${esc(v.customer_name)}"></label>
       <label>Contact name<input name="contact_name" value="${esc(v.contact_name)}"></label>
@@ -334,7 +475,7 @@ function projectForm(p = null) {
       <h3 class="full" style="margin:6px 0 0">Site</h3>
       <label class="full">Address<input name="address" value="${esc(v.address)}"></label>
       <label>City<input name="city" value="${esc(v.city)}"></label>
-      <label>State<input name="state" value="${esc(v.state)}"></label>
+      <label>State<select name="state">${stateOptions(v.state)}</select></label>
       <label>ZIP<input name="zip" value="${esc(v.zip)}"></label>
       <label>Site type<select name="site_type">${options(e.siteType, v.site_type, { blank: '—' })}</select></label>
       <h3 class="full" style="margin:6px 0 0">Charging scope</h3>
@@ -344,14 +485,16 @@ function projectForm(p = null) {
       <label>Estimated value (USD)<input name="estimated_value" type="number" min="0" step="any" value="${esc(v.estimated_value)}"></label>
       <label>Target live date<input name="target_live_date" type="date" value="${esc(v.target_live_date)}"></label>
       <label class="full">Description / scope notes<textarea name="description">${esc(v.description)}</textarea></label>
-      <div class="modal-foot full"><button type="button" class="btn" data-close>Cancel</button><button class="btn primary">${p ? 'Save changes' : 'Create project'}</button></div>
+      ${isDD ? '' : ddSection}
+      <div class="modal-foot full"><button type="button" class="btn" data-close>Cancel</button><button class="btn primary">${p ? 'Save changes' : isDD ? 'Add property' : 'Create project'}</button></div>
     </form>`, { wide: true });
   $('form', card).addEventListener('submit', async (ev) => {
     ev.preventDefault();
     try {
       const data = formData(ev.target);
+      if (!p) { if (data.start === 'dd') data.phase = 'diligence'; else { data.phase = 'pipeline'; data.stage_id = data.start; } delete data.start; }
       const saved = p ? await api('PATCH', `/api/projects/${p.id}`, data) : await api('POST', '/api/projects', data);
-      modalClose = null; closeModal(); toast(p ? 'Project saved' : `Created ${saved.code}`);
+      modalClose = null; closeModal(); toast(p ? 'Project saved' : saved.phase === 'diligence' ? `Added ${saved.code} to due diligence` : `Created ${saved.code}`);
       if (p) route(); else location.hash = `#/projects/${saved.id}`;
     } catch (err) { fail(err); }
   });
@@ -362,29 +505,44 @@ let projectTab = 'tickets';
 async function renderProject(id) {
   const p = await api('GET', `/api/projects/${id}`);
   const cur = S.meta.stages.findIndex((s) => s.id === p.stage_id);
+  const dd = p.phase === 'diligence';
+  const missing = ddMissing(p);
+  $$('[data-nav]').forEach((a) => a.classList.toggle('active', a.dataset.nav === (dd ? 'diligence' : 'projects')));
   view.innerHTML = `
     <div class="page-head">
-      <div><div class="muted small"><a href="#/projects">Projects</a> / ${esc(p.code)}</div>
+      <div><div class="muted small">${dd ? '<a href="#/diligence">Due Diligence</a>' : '<a href="#/projects">Projects</a>'} / ${esc(p.code)}</div>
         <h1>${esc(p.name)}</h1>
-        <div style="display:flex;gap:6px;margin-top:6px;flex-wrap:wrap;align-items:center">${stageBadge(p.stage_name, p.stage_color)} ${statusBadge(p.status)} ${prioBadge(p.priority)}
-          <span class="small ${isStale(p) ? 'stale' : 'muted'}">${p.days_in_stage} days in stage${isStale(p) ? ` (SLA ${p.stale_days}d)` : ''}</span></div>
+        <div style="display:flex;gap:6px;margin-top:6px;flex-wrap:wrap;align-items:center">${dd ? phaseBadge() : stageBadge(p.stage_name, p.stage_color)} ${statusBadge(p.status)} ${prioBadge(p.priority)}
+          ${p.state ? badge('', stateName(p.state)) : ''}
+          ${dd ? `<span class="small muted">${p.days_in_stage} days in due diligence</span>`
+            : `<span class="small ${isStale(p) ? 'stale' : 'muted'}">${p.days_in_stage} days in stage${isStale(p) ? ` (SLA ${p.stale_days}d)` : ''}</span>`}</div>
         ${p.hold_reason && p.status !== 'active' ? `<div class="small" style="margin-top:6px;color:var(--warn)"><b>Hold reason:</b> ${esc(p.hold_reason)}</div>` : ''}
       </div>
       <div class="actions">
         <select id="quickStatus" title="Status">${options(S.meta.enums.projectStatus, p.status)}</select>
-        <button class="btn" id="moveStage">Move stage</button>
+        ${dd ? `<button class="btn ${missing.length ? '' : 'primary'}" id="promote">Move to pipeline →</button>` : '<button class="btn" id="moveStage">Move stage</button>'}
         <button class="btn" id="editProject">Edit</button>
         ${S.me.role === 'admin' ? '<button class="btn danger" id="delProject">Delete</button>' : ''}
       </div>
     </div>
-    <div class="card" style="padding:10px 12px"><div class="stepper">${S.meta.stages.map((s, i) =>
-      `<button class="step ${i < cur ? 'done' : i === cur ? 'current' : ''}" data-stage="${s.id}" title="Move to ${esc(s.name)}">${esc(s.name)}</button>`).join('')}</div></div>
+    ${dd ? `<div class="card dd-card"><h2 style="margin-bottom:8px">Due diligence checklist</h2>
+      <div class="checks big">${DD_CHECKS.map(([k, t]) => `<span class="chk ${String(p[k] ?? '').trim() ? 'ok' : ''}">${String(p[k] ?? '').trim() ? '✓' : '○'} ${esc(t)}${String(p[k] ?? '').trim() ? `: <b>${esc(p[k])}</b>` : ''}</span>`).join('')}</div>
+      <div class="small muted" style="margin-top:8px">${missing.length ? `Still needed: ${missing.map(([, t]) => esc(t)).join(', ')}. Click <b>Edit</b> to fill them in.` : 'All checks done. Click <b>Move to pipeline</b> and pick the stage it should start in.'}</div></div>`
+    : `<div class="card" style="padding:10px 12px"><div class="stepper">${S.meta.stages.map((s, i) =>
+      `<button class="step ${i < cur ? 'done' : i === cur ? 'current' : ''}" data-stage="${s.id}" title="Move to ${esc(s.name)}">${esc(s.name)}</button>`).join('')}</div></div>`}
     <div class="cols-main" style="margin-top:16px">
       <div>
         <div class="tabs" style="margin-top:0">${['tickets', 'documents', 'timeline', 'activity'].map((t) => `<button class="tab ${projectTab === t ? 'active' : ''}" data-tab="${t}">${label(t)}${t === 'tickets' && p.open_tickets ? ` (${p.open_tickets})` : ''}${t === 'documents' && p.doc_count ? ` (${p.doc_count})` : ''}</button>`).join('')}</div>
         <div id="tabBody"></div>
       </div>
       <div class="grid" style="gap:16px">
+        <div class="card"><h2>Due diligence</h2><dl class="kv">
+          <dt>Property owner</dt><dd>${esc(p.property_owner || '—')}</dd>
+          <dt>Owner contact</dt><dd>${esc(p.property_owner_contact || '—')}</dd>
+          <dt>Rebate</dt><dd>${esc(p.rebate_program || '—')}${p.rebate_amount ? ` · ${money(p.rebate_amount)}` : ''}</dd>
+          <dt>Utility</dt><dd>${esc(p.utility_company || '—')}</dd>
+          ${p.diligence_completed_at ? `<dt>Completed</dt><dd>${fdate(p.diligence_completed_at)}</dd>` : ''}
+        </dl>${p.diligence_notes ? `<h3 style="margin-top:14px">Notes</h3><div style="white-space:pre-wrap">${esc(p.diligence_notes)}</div>` : ''}</div>
         <div class="card"><h2>Customer</h2><dl class="kv">
           <dt>Company</dt><dd>${esc(p.customer_name || '—')}</dd>
           <dt>Contact</dt><dd>${esc(p.contact_name || '—')}</dd>
@@ -406,7 +564,8 @@ async function renderProject(id) {
     </div>`;
 
   $('#editProject').onclick = () => projectForm(p);
-  $('#moveStage').onclick = () => stageModal(p, null, route);
+  $('#moveStage')?.addEventListener('click', () => stageModal(p, null, route));
+  $('#promote')?.addEventListener('click', () => promoteModal(p, route));
   $$('.step', view).forEach((b) => (b.onclick = () => { if (Number(b.dataset.stage) !== p.stage_id) stageModal(p, Number(b.dataset.stage), route); }));
   $('#quickStatus').onchange = async (e) => {
     const status = e.target.value; let hold_reason;
