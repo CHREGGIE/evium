@@ -30,7 +30,8 @@ app.use(express.json({ limit: '1mb' }));
 app.use((req, res, next) => {
   res.setHeader('X-Content-Type-Options', 'nosniff');
   res.setHeader('X-Frame-Options', 'DENY');
-  res.setHeader('Referrer-Policy', 'same-origin');
+  // send only our site address (never full page paths) to other sites; OpenStreetMap's tile servers require it
+  res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin');
   next();
 });
 

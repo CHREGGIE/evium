@@ -694,7 +694,8 @@ async function renderMap() {
   if (!$('#map')) return; // navigated away while loading
   $('#map').innerHTML = '';
   const map = L.map('map', { scrollWheelZoom: true }).setView([39.5, -96], 4);
-  L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom: 19, attribution: '&copy; OpenStreetMap contributors' }).addTo(map);
+  // OpenStreetMap refuses tiles (403) when the request doesn't say which site it comes from
+  L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom: 19, referrerPolicy: 'strict-origin-when-cross-origin', attribution: '&copy; OpenStreetMap contributors' }).addTo(map);
   const save = async (p, ll, revert) => {
     try { await api('PATCH', `/api/projects/${p.id}`, { lat: +ll.lat.toFixed(6), lng: +ll.lng.toFixed(6) }); toast('Pin saved'); return true; } catch (err) { fail(err); revert?.(); return false; }
   };
