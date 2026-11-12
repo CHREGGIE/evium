@@ -298,48 +298,76 @@ function promoteModal(p, after) {
   });
 }
 
-// ---------- pipeline (kanban, one lane per US state) ----------
+// ---------- pipeline (one row per address, grouped by US state) ----------
 const laneKey = 'evium.pipeline.collapsed';
 const getCollapsed = () => { try { return new Set(JSON.parse(localStorage.getItem(laneKey) || '[]')); } catch { return new Set(); } };
 const setCollapsed = (set) => { try { localStorage.setItem(laneKey, JSON.stringify([...set])); } catch { /* storage unavailable */ } };
+const openRows = new Set(); // rows whose stage steps are showing
 
 async function renderPipeline() {
   const params = new URLSearchParams({ phase: 'pipeline', status: qs().get('status') || 'open' });
   if (qs().get('owner_id')) params.set('owner_id', qs().get('owner_id'));
+  if (qs().get('stage_id')) params.set('stage_id', qs().get('stage_id'));
   const stateSel = qs().get('state') || '';
   const all = await api('GET', `/api/projects?${params}`);
   const keyOf = (p) => (p.state || '').toUpperCase() || 'none';
   const groups = {};
   all.forEach((p) => (groups[keyOf(p)] ||= []).push(p));
+  // within a state: furthest-along stage first, then longest in stage
+  Object.values(groups).forEach((l) => l.sort((a, b) => (b.stage_position || 0) - (a.stage_position || 0) || b.days_in_stage - a.days_in_stage));
   const keys = Object.keys(groups).sort((a, b) => (a === 'none') - (b === 'none') || stateName(a).localeCompare(stateName(b)));
   const shown = stateSel ? keys.filter((k) => k === stateSel) : keys;
   const collapsed = getCollapsed();
   const sum = (list, f) => list.reduce((a, p) => a + (p[f] || 0), 0);
+  const total = S.meta.stages.length;
+
+  const row = (p) => {
+    const idx = S.meta.stages.findIndex((s) => s.id === p.stage_id);
+    const open = openRows.has(p.id);
+    const line1 = p.address || p.name;
+    const line2 = [[p.city, p.state].filter(Boolean).join(', '), p.address ? p.name : '', p.code].filter(Boolean).join(' · ');
+    const cls = isStale(p) ? 'is-stale' : ['on_hold', 'blocked'].includes(p.status) ? 'is-hold' : '';
+    return `<div class="prow ${cls} ${open ? 'open' : ''}">
+      <button class="prow-main" type="button" data-row="${p.id}" aria-expanded="${open}">
+        <span class="prow-addr"><b>${esc(line1)}</b><span class="muted small">${esc(line2)}</span></span>
+        <span class="stage-tag" title="Stage ${idx + 1} of ${total}"><span class="dot" style="background:${esc(p.stage_color)}"></span>${esc(p.stage_name || '—')}<span class="muted">${idx + 1}/${total}</span></span>
+        <span class="prow-days small ${isStale(p) ? 'stale' : 'muted'}">${p.days_in_stage}d</span>
+        <span class="prow-extra small">${p.status !== 'active' ? statusBadge(p.status) : ''}${p.estimated_value ? `<span class="muted">${money(p.estimated_value)}</span>` : ''}</span>
+        <span class="caret muted">${open ? '▾' : '▸'}</span>
+      </button>
+      ${open ? `<div class="prow-detail">
+        <div class="stepper">${S.meta.stages.map((s, i) =>
+          `<button class="step ${i < idx ? 'done' : i === idx ? 'current' : ''}" data-move="${p.id}" data-stage="${s.id}" title="Move to ${esc(s.name)}">${esc(s.name)}</button>`).join('')}</div>
+        <div class="prow-facts small">
+          <span>${p.customer_name ? esc(p.customer_name) : '<span class="muted">No customer</span>'}</span>
+          ${p.charger_count ? `<span>${p.charger_count}× ${esc(p.charger_type || 'ports')}</span>` : ''}
+          <span class="${isStale(p) ? 'stale' : 'muted'}">${p.days_in_stage} days in stage${isStale(p) ? ` (SLA ${p.stale_days}d)` : ''}</span>
+          ${p.owner_name ? `<span>👤 ${esc(p.owner_name)}</span>` : ''}
+          ${p.open_tickets ? `<span>🎫 ${p.open_tickets} open</span>` : ''}
+          ${p.hold_reason && p.status !== 'active' ? `<span style="color:var(--warn)">${esc(p.hold_reason)}</span>` : ''}
+          <a class="btn sm" href="#/projects/${p.id}">Open project →</a>
+        </div>
+      </div>` : ''}
+    </div>`;
+  };
 
   const lane = (k) => {
     const list = groups[k] || [];
-    const by = {}; S.meta.stages.forEach((s) => (by[s.id] = []));
-    list.forEach((p) => by[p.stage_id]?.push(p));
     const isOpen = stateSel || !collapsed.has(k);
-    return `<section class="lane ${isOpen ? '' : 'collapsed'}" data-lane="${esc(k)}">
+    return `<section class="lane ${isOpen ? '' : 'collapsed'}">
       <button class="lane-head" type="button" data-toggle="${esc(k)}">
         <span class="caret">${isOpen ? '▾' : '▸'}</span>
         <span class="lane-title">${k === 'none' ? 'No state set' : `${esc(stateName(k))} <span class="muted">${esc(k)}</span>`}</span>
         <span class="sub">${list.length} project${list.length === 1 ? '' : 's'} · ${num(sum(list, 'charger_count'))} ports · ${money(sum(list, 'estimated_value'))}</span>
       </button>
-      ${isOpen ? `<div class="board lane-board">${S.meta.stages.map((s) => {
-        const cards = by[s.id] || [];
-        const value = sum(cards, 'estimated_value');
-        return `<div class="column ${cards.length ? '' : 'is-empty'}" data-stage="${s.id}" title="${esc(s.name)}">
-          <div class="column-head" style="border-color:${esc(s.color)}"><span>${esc(s.name)} <span class="sub">${cards.length}</span></span><span class="sub">${value ? money(value) : ''}</span></div>
-          <div class="column-body">${cards.map(pcard).join('')}</div></div>`;
-      }).join('')}</div>` : ''}
+      ${isOpen ? `<div class="prows">${list.map(row).join('')}</div>` : ''}
     </section>`;
   };
 
   view.innerHTML = `
     <div class="page-head"><h1>Pipeline <span class="muted small">${all.length}</span></h1>
       <div class="actions">
+        <select id="pStage">${options(S.meta.stages.map((s) => [s.id, s.name]), params.get('stage_id'), { blank: 'All stages' })}</select>
         <select id="pStatus">${options([['open', 'Open (active/hold/blocked)'], ['active', 'Active'], ['on_hold', 'On hold'], ['blocked', 'Blocked'], ['won', 'Won'], ['', 'All statuses']], params.get('status'))}</select>
         <select id="pOwner">${options(S.meta.users.map((u) => [u.id, u.name]), params.get('owner_id'), { blank: 'All owners' })}</select>
         <a class="btn" href="#/diligence">Due diligence →</a>
@@ -348,49 +376,30 @@ async function renderPipeline() {
       <button class="chip ${stateSel ? '' : 'active'}" data-state="">All states <span>${all.length}</span></button>
       ${keys.map((k) => `<button class="chip ${stateSel === k ? 'active' : ''}" data-state="${esc(k)}" title="${esc(stateName(k))}">${k === 'none' ? 'No state' : esc(k)} <span>${groups[k].length}</span></button>`).join('')}
     </div>
-    <p class="muted small">Grouped by state. Drag a card to another column to move it through the funnel. Red edge = past the stage SLA; amber = on hold or blocked. New properties are added in <a href="#/diligence">Due Diligence</a>.</p>
+    <p class="muted small">One row per site, grouped by state. Click a row to see all the stages and move it along. Red edge = past the stage SLA; amber = on hold or blocked.</p>
     ${shown.map(lane).join('') || `<div class="card empty">${stateSel ? 'No projects in this state.' : 'No projects in the pipeline yet. Finish due diligence on a property to move it here.'}</div>`}`;
 
   const go = (over = {}) => {
     const p = new URLSearchParams(); p.set('status', $('#pStatus').value);
     if ($('#pOwner').value) p.set('owner_id', $('#pOwner').value);
+    if ($('#pStage').value) p.set('stage_id', $('#pStage').value);
     const st = 'state' in over ? over.state : stateSel; if (st) p.set('state', st);
     location.hash = `#/pipeline?${p}`;
   };
-  $('#pStatus').onchange = () => go(); $('#pOwner').onchange = () => go();
+  $('#pStatus').onchange = () => go(); $('#pOwner').onchange = () => go(); $('#pStage').onchange = () => go();
   $$('.chip', view).forEach((c) => (c.onclick = () => go({ state: c.dataset.state })));
   $$('[data-toggle]', view).forEach((b) => (b.onclick = () => {
     if (stateSel) return; // a single selected state always stays open
     const set = getCollapsed(); const k = b.dataset.toggle;
     set.has(k) ? set.delete(k) : set.add(k); setCollapsed(set); renderPipeline();
   }));
-
-  let dragId = null;
-  $$('.pcard', view).forEach((c) => {
-    c.addEventListener('dragstart', (e) => { dragId = c.dataset.id; e.dataTransfer.effectAllowed = 'move'; });
-    c.addEventListener('click', () => (location.hash = `#/projects/${c.dataset.id}`));
-  });
-  $$('.column', view).forEach((col) => {
-    col.addEventListener('dragover', (e) => { e.preventDefault(); col.classList.add('drop'); });
-    col.addEventListener('dragleave', () => col.classList.remove('drop'));
-    col.addEventListener('drop', (e) => {
-      e.preventDefault(); col.classList.remove('drop');
-      const p = all.find((x) => String(x.id) === dragId);
-      if (p && String(p.stage_id) !== col.dataset.stage) stageModal(p, Number(col.dataset.stage), renderPipeline);
-    });
-  });
-}
-
-function pcard(p) {
-  const cls = isStale(p) ? 'is-stale' : ['on_hold', 'blocked'].includes(p.status) ? 'is-hold' : '';
-  return `<div class="pcard ${cls}" draggable="true" data-id="${p.id}">
-    <div class="t">${esc(p.name)}</div>
-    <div class="muted small">${esc(p.code)}${p.customer_name ? ` · ${esc(p.customer_name)}` : ''}${p.city ? ` · ${esc(p.city)}` : ''}</div>
-    <div class="meta"><span>${p.charger_count ? `${p.charger_count}× ${esc(p.charger_type || 'ports')}` : ''}</span><span>${p.estimated_value ? money(p.estimated_value) : ''}</span></div>
-    <div class="meta"><span class="${isStale(p) ? 'stale' : ''}">${p.days_in_stage}d in stage</span>
-      <span>${p.status !== 'active' ? statusBadge(p.status) : ''} ${p.open_tickets ? `🎫 ${p.open_tickets}` : ''}</span></div>
-    ${p.owner_name ? `<div class="meta"><span>👤 ${esc(p.owner_name)}</span></div>` : ''}
-  </div>`;
+  $$('[data-row]', view).forEach((b) => (b.onclick = () => {
+    const id = Number(b.dataset.row); openRows.has(id) ? openRows.delete(id) : openRows.add(id); renderPipeline();
+  }));
+  $$('[data-move]', view).forEach((b) => (b.onclick = () => {
+    const p = all.find((x) => String(x.id) === b.dataset.move);
+    if (p && String(p.stage_id) !== b.dataset.stage) stageModal(p, Number(b.dataset.stage), renderPipeline);
+  }));
 }
 
 function stageModal(p, toStageId, after) {
