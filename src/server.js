@@ -160,6 +160,7 @@ app.get('/api/meta', (req, res) => {
     milestones: getMilestones(),
     users: db.prepare('SELECT id, name, email, role, active, states, can_review, dd_assessor, milestone_ids, title, is_exec, grants, dashboard FROM users ORDER BY name').all(),
     utilities: db.prepare('SELECT id, name, states FROM utilities ORDER BY name').all(),
+    contractors: db.prepare('SELECT id, company, contact_name, phone, email, states, active FROM contractors ORDER BY company').all(),
     rebates: db.prepare('SELECT id, name, state, kind, status, amount_text, provider FROM rebates ORDER BY state, name').all(),
     statesInUse: db.prepare("SELECT DISTINCT state FROM projects WHERE state IS NOT NULL AND state <> '' UNION SELECT DISTINCT state FROM rebates WHERE state <> 'US'").all().map((r) => r.state).sort(),
     enums: { ...ENUMS, milestoneStatus: MS_STATUSES },
@@ -1115,11 +1116,124 @@ setTimeout(async () => {
   for (const { id } of todo) { await geocodeProject(id); await new Promise((r) => setTimeout(r, 1000)); }
 }, 3000).unref();
 
+// ---------- electricians directory ----------
+const CONTRACTOR_FIELDS = ['company', 'contact_name', 'phone', 'email', 'states', 'license', 'notes', 'active'];
+function cleanContractor(body) {
+  const d = pick(body || {}, CONTRACTOR_FIELDS);
+  if ('company' in d && !String(d.company || '').trim()) bad('Company name is required');
+  if ('states' in d) d.states = normStates(d.states);
+  if ('active' in d) d.active = d.active === false || d.active === 0 || d.active === '0' ? 0 : 1;
+  return d;
+}
+const CONTRACTOR_SELECT = `SELECT c.*, u.name AS updated_by_name,
+    (SELECT COUNT(*) FROM quotes q WHERE q.contractor_id = c.id) AS quote_count,
+    (SELECT COUNT(*) FROM quotes q WHERE q.contractor_id = c.id AND q.status = 'selected') AS won_count,
+    (SELECT COUNT(*) FROM events e WHERE e.contractor_id = c.id AND e.status = 'scheduled' AND e.starts_at >= strftime('%Y-%m-%dT%H:%M', 'now')) AS upcoming
+  FROM contractors c LEFT JOIN users u ON u.id = c.updated_by`;
+app.get('/api/contractors', (req, res) => res.json(db.prepare(`${CONTRACTOR_SELECT} ORDER BY c.active DESC, c.company`).all()));
+app.get('/api/contractors/:id', (req, res) => {
+  const c = db.prepare(`${CONTRACTOR_SELECT} WHERE c.id = ?`).get(req.params.id);
+  if (!c) return res.status(404).json({ error: 'Electrician not found' });
+  c.quotes = db.prepare(`SELECT q.*, p.code, p.name AS project_name, p.address, p.city, p.state FROM quotes q JOIN projects p ON p.id = q.project_id
+    WHERE q.contractor_id = ? ORDER BY q.updated_at DESC`).all(c.id);
+  c.events = db.prepare(`SELECT e.id, e.kind, e.starts_at, e.ends_at, e.status, p.code, p.name AS project_name, p.address FROM events e
+    LEFT JOIN projects p ON p.id = e.project_id WHERE e.contractor_id = ? ORDER BY e.starts_at DESC LIMIT 50`).all(c.id);
+  res.json(c);
+});
+app.post('/api/contractors', wrap((req, res) => {
+  const d = cleanContractor(req.body);
+  if (!d.company) bad('Company name is required');
+  const cols = [...Object.keys(d), 'updated_by'];
+  const id = db.prepare(`INSERT INTO contractors (${cols.join(',')}) VALUES (${cols.map(() => '?').join(',')})`).run(...Object.values(d), req.user.id).lastInsertRowid;
+  res.status(201).json(db.prepare(`${CONTRACTOR_SELECT} WHERE c.id = ?`).get(id));
+}));
+app.patch('/api/contractors/:id', wrap((req, res) => {
+  const c = db.prepare('SELECT * FROM contractors WHERE id = ?').get(req.params.id) || notFound('Electrician not found');
+  const d = cleanContractor(req.body); const cols = Object.keys(d);
+  if (cols.length) db.prepare(`UPDATE contractors SET ${cols.map((k) => `${k} = ?`).join(', ')}, updated_by = ?, updated_at = ? WHERE id = ?`).run(...Object.values(d), req.user.id, now(), c.id);
+  res.json(db.prepare(`${CONTRACTOR_SELECT} WHERE c.id = ?`).get(c.id));
+}));
+app.delete('/api/contractors/:id', wrap((req, res) => {
+  const used = db.prepare('SELECT COUNT(*) c FROM quotes WHERE contractor_id = ?').get(req.params.id).c;
+  if (used) bad(`This electrician has ${used} quote(s). Mark them inactive instead.`);
+  db.prepare('DELETE FROM contractors WHERE id = ?').run(req.params.id);
+  res.json({ ok: true });
+}));
+
+// ---------- electrical quotes (usually 3 per site) ----------
+const QUOTE_STATUSES = ['requested', 'walk_booked', 'received', 'selected', 'declined'];
+function quotesFor(projectId) {
+  return db.prepare(`SELECT q.*, c.company, c.contact_name, c.phone, c.email, c.states AS contractor_states, d.original_name AS document_name, d.mime AS document_mime,
+      (SELECT e.id FROM events e WHERE e.project_id = q.project_id AND e.contractor_id = q.contractor_id AND e.kind = 'site_walk' AND e.status <> 'cancelled' ORDER BY e.starts_at DESC LIMIT 1) AS walk_id,
+      (SELECT e.starts_at FROM events e WHERE e.project_id = q.project_id AND e.contractor_id = q.contractor_id AND e.kind = 'site_walk' AND e.status <> 'cancelled' ORDER BY e.starts_at DESC LIMIT 1) AS walk_at,
+      (SELECT e.status FROM events e WHERE e.project_id = q.project_id AND e.contractor_id = q.contractor_id AND e.kind = 'site_walk' AND e.status <> 'cancelled' ORDER BY e.starts_at DESC LIMIT 1) AS walk_status
+    FROM quotes q JOIN contractors c ON c.id = q.contractor_id LEFT JOIN documents d ON d.id = q.document_id
+    WHERE q.project_id = ? ORDER BY CASE q.status WHEN 'selected' THEN 0 WHEN 'declined' THEN 2 ELSE 1 END, q.amount IS NULL, q.amount, q.id`).all(projectId);
+}
+// tick a step on the site walk milestone whose label matches (e.g. "pick the best quote")
+function tickStep(projectId, likes, userId) {
+  const m = siteWalkMilestone(); if (!m) return;
+  ensureSteps(projectId, m.id);
+  for (const like of likes) {
+    const s = db.prepare('SELECT id FROM project_steps WHERE project_id = ? AND milestone_id = ? AND done_at IS NULL AND LOWER(label) LIKE ? ORDER BY position LIMIT 1').get(projectId, m.id, like);
+    if (s) db.prepare('UPDATE project_steps SET done_at = ?, done_by = ? WHERE id = ?').run(now(), userId, s.id);
+  }
+}
+app.get('/api/projects/:id/quotes', (req, res) => res.json(quotesFor(req.params.id)));
+app.post('/api/projects/:id/quotes', wrap((req, res) => {
+  const p = db.prepare('SELECT id FROM projects WHERE id = ?').get(req.params.id) || notFound('Project not found');
+  const c = db.prepare('SELECT * FROM contractors WHERE id = ?').get(Number(req.body?.contractor_id)) || bad('Pick an electrician');
+  if (db.prepare('SELECT 1 FROM quotes WHERE project_id = ? AND contractor_id = ?').get(p.id, c.id)) bad(`${c.company} is already quoting this site`);
+  db.prepare('INSERT INTO quotes (project_id, contractor_id, created_by) VALUES (?,?,?)').run(p.id, c.id, req.user.id);
+  logActivity(p.id, req.user.id, 'quote', `Asked ${c.company} for a quote`);
+  res.status(201).json(quotesFor(p.id));
+}));
+app.patch('/api/quotes/:id', wrap((req, res) => {
+  const q = db.prepare('SELECT * FROM quotes WHERE id = ?').get(req.params.id) || notFound('Quote not found');
+  const b = req.body || {}; const d = {};
+  if ('amount' in b) { d.amount = b.amount === '' || b.amount == null ? null : Number(b.amount); if (d.amount != null && Number.isNaN(d.amount)) bad('Amount must be a number'); }
+  for (const k of ['scope', 'notes']) if (k in b) d[k] = String(b[k] ?? '').trim().slice(0, 4000) || null;
+  if ('received_on' in b) { d.received_on = b.received_on || null; if (d.received_on && !/^\d{4}-\d{2}-\d{2}$/.test(d.received_on)) bad('Invalid date'); }
+  if ('status' in b) { if (!QUOTE_STATUSES.includes(b.status) || b.status === 'selected') bad('Invalid status'); d.status = b.status; }
+  // a quote with an amount counts as received
+  if (d.amount != null && ['requested', 'walk_booked'].includes(d.status ?? q.status)) { d.status = 'received'; d.received_on ||= q.received_on || new Date().toISOString().slice(0, 10); }
+  const cols = Object.keys(d);
+  if (cols.length) db.prepare(`UPDATE quotes SET ${cols.map((k) => `${k} = ?`).join(', ')}, updated_at = ? WHERE id = ?`).run(...Object.values(d), now(), q.id);
+  if (d.amount != null && d.amount !== q.amount) {
+    const c = db.prepare('SELECT company FROM contractors WHERE id = ?').get(q.contractor_id);
+    logActivity(q.project_id, req.user.id, 'quote', `${c.company} quoted $${Math.round(d.amount).toLocaleString('en-US')}`);
+  }
+  res.json(quotesFor(q.project_id));
+}));
+// the best quote wins: that electrician gets the job, the others are declined
+app.post('/api/quotes/:id/select', wrap((req, res) => {
+  const q = db.prepare('SELECT * FROM quotes WHERE id = ?').get(req.params.id) || notFound('Quote not found');
+  const c = db.prepare('SELECT company FROM contractors WHERE id = ?').get(q.contractor_id);
+  db.transaction(() => {
+    db.prepare("UPDATE quotes SET status = 'declined', updated_at = ? WHERE project_id = ? AND id <> ? AND status <> 'declined'").run(now(), q.project_id, q.id);
+    db.prepare("UPDATE quotes SET status = 'selected', updated_at = ? WHERE id = ?").run(now(), q.id);
+    db.prepare('UPDATE projects SET contractor_id = ?, updated_at = ? WHERE id = ?').run(q.contractor_id, now(), q.project_id);
+    tickStep(q.project_id, ['%site walks done%', '%collect%quote%', '%best quote%'], req.user.id);
+    logActivity(q.project_id, req.user.id, 'quote', `Picked ${c.company}${q.amount ? ` ($${Math.round(q.amount).toLocaleString('en-US')})` : ''} for the job`);
+  })();
+  res.json(quotesFor(q.project_id));
+}));
+app.delete('/api/quotes/:id', wrap((req, res) => {
+  const q = db.prepare('SELECT * FROM quotes WHERE id = ?').get(req.params.id) || notFound('Quote not found');
+  db.transaction(() => {
+    db.prepare('DELETE FROM quotes WHERE id = ?').run(q.id);
+    if (q.status === 'selected') db.prepare('UPDATE projects SET contractor_id = NULL WHERE id = ? AND contractor_id = ?').run(q.project_id, q.contractor_id);
+  })();
+  res.json(quotesFor(q.project_id));
+}));
+
 // ---------- calendar ----------
 const EVENT_KINDS = { site_walk: 'Site walk', installation: 'Installation', inspection: 'Inspection', meeting: 'Meeting', other: 'Other' };
 const DT = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/;
-const EVENT_SELECT = `SELECT e.*, p.code, p.name AS project_name, p.address, p.city, p.state, m.name AS milestone, c.name AS created_by_name
-  FROM events e LEFT JOIN projects p ON p.id = e.project_id LEFT JOIN milestones m ON m.id = e.milestone_id LEFT JOIN users c ON c.id = e.created_by`;
+const EVENT_SELECT = `SELECT e.*, p.code, p.name AS project_name, p.address, p.city, p.state, m.name AS milestone, c.name AS created_by_name,
+    k.company AS contractor_company, k.contact_name AS contractor_contact, k.phone AS contractor_phone, k.email AS contractor_email
+  FROM events e LEFT JOIN projects p ON p.id = e.project_id LEFT JOIN milestones m ON m.id = e.milestone_id LEFT JOIN users c ON c.id = e.created_by
+  LEFT JOIN contractors k ON k.id = e.contractor_id`;
 function withPeople(list) {
   if (!list.length) return list;
   const ids = list.map((e) => e.id);
@@ -1141,12 +1255,19 @@ function milestoneForKind(kind) {
   return like ? db.prepare('SELECT * FROM milestones WHERE LOWER(name) LIKE ? ORDER BY position LIMIT 1').get(like) : null;
 }
 // people already booked at an overlapping time
-function conflictsFor(people, starts, ends, exceptId) {
-  if (!people.length) return [];
-  return db.prepare(`SELECT e.id, e.kind, e.title, e.starts_at, e.ends_at, p.name AS project_name, u.name AS person
+function conflictsFor(people, starts, ends, exceptId, contractorId) {
+  const clash = [];
+  if (contractorId) {
+    clash.push(...db.prepare(`SELECT e.id, e.kind, e.title, e.starts_at, e.ends_at, p.name AS project_name, k.company AS person
+      FROM events e JOIN contractors k ON k.id = e.contractor_id LEFT JOIN projects p ON p.id = e.project_id
+      WHERE e.status <> 'cancelled' AND e.starts_at < ? AND e.ends_at > ? AND e.contractor_id = ? ${exceptId ? 'AND e.id <> ?' : ''}`)
+      .all(ends, starts, contractorId, ...(exceptId ? [exceptId] : [])));
+  }
+  if (!people.length) return clash;
+  return clash.concat(db.prepare(`SELECT e.id, e.kind, e.title, e.starts_at, e.ends_at, p.name AS project_name, u.name AS person
       FROM events e JOIN event_people ep ON ep.event_id = e.id JOIN users u ON u.id = ep.user_id LEFT JOIN projects p ON p.id = e.project_id
       WHERE e.status <> 'cancelled' AND e.starts_at < ? AND e.ends_at > ? AND ep.user_id IN (${people.map(() => '?').join(',')}) ${exceptId ? 'AND e.id <> ?' : ''}`)
-    .all(ends, starts, ...people, ...(exceptId ? [exceptId] : []));
+    .all(ends, starts, ...people, ...(exceptId ? [exceptId] : [])));
 }
 function cleanEvent(body, existing) {
   const d = {};
@@ -1154,6 +1275,10 @@ function cleanEvent(body, existing) {
   for (const k of ['starts_at', 'ends_at']) if (k in body) { if (!DT.test(String(body[k]))) bad('Pick a date and time'); d[k] = String(body[k]); }
   for (const k of ['title', 'location', 'notes']) if (k in body) d[k] = String(body[k] ?? '').trim().slice(0, 2000) || null;
   if ('status' in body) { if (!['scheduled', 'done', 'cancelled'].includes(body.status)) bad('Invalid status'); d.status = body.status; }
+  if ('contractor_id' in body) {
+    d.contractor_id = body.contractor_id ? Number(body.contractor_id) : null;
+    if (d.contractor_id && !db.prepare('SELECT 1 FROM contractors WHERE id = ?').get(d.contractor_id)) bad('Unknown electrician');
+  }
   if ('project_id' in body) {
     d.project_id = body.project_id ? Number(body.project_id) : null;
     if (d.project_id && !db.prepare('SELECT 1 FROM projects WHERE id = ?').get(d.project_id)) bad('Unknown site');
@@ -1173,7 +1298,8 @@ app.get('/api/events', (req, res) => {
   if (kind) { where.push('e.kind = ?'); args.push(kind); }
   if (project_id) { where.push('e.project_id = ?'); args.push(Number(project_id)); }
   if (milestone_id) { where.push('e.milestone_id = ?'); args.push(Number(milestone_id)); }
-  if (user_id) { where.push('e.id IN (SELECT event_id FROM event_people WHERE user_id = ?)'); args.push(user_id === 'me' ? req.user.id : Number(user_id)); }
+  if (user_id) { const uid = user_id === 'me' ? req.user.id : Number(user_id); where.push('(e.id IN (SELECT event_id FROM event_people WHERE user_id = ?) OR e.created_by = ?)'); args.push(uid, uid); }
+  if (req.query.contractor_id) { where.push('e.contractor_id = ?'); args.push(Number(req.query.contractor_id)); }
   if (!include_cancelled) where.push("e.status <> 'cancelled'");
   res.json(withPeople(db.prepare(`${EVENT_SELECT} ${where.length ? `WHERE ${where.join(' AND ')}` : ''} ORDER BY e.starts_at, e.id LIMIT 1000`).all(...args)));
 });
@@ -1183,7 +1309,7 @@ app.post('/api/events', wrap((req, res) => {
   const d = cleanEvent({ kind: 'site_walk', ...body });
   if (!d.starts_at || !d.ends_at) bad('Pick a date and time');
   const people = peopleFrom(body);
-  const clash = conflictsFor(people, d.starts_at, d.ends_at);
+  const clash = conflictsFor(people, d.starts_at, d.ends_at, null, d.contractor_id);
   if (clash.length && !body.force) throw new HttpError(409, 'Double-booked', { conflicts: clash });
   const p = d.project_id ? db.prepare('SELECT * FROM projects WHERE id = ?').get(d.project_id) : null;
   const m = p ? milestoneForKind(d.kind) : null;
@@ -1196,18 +1322,23 @@ app.post('/api/events', wrap((req, res) => {
     people.forEach((u) => ins.run(eid, u));
     const e = getEvent(eid);
     if (p) {
-      logActivity(p.id, req.user.id, 'event_booked', `${EVENT_KINDS[d.kind]} booked for ${fmtWhen(e)}${people.length ? ` with ${e.people.map((x) => x.name).join(', ')}` : ''}`);
+      logActivity(p.id, req.user.id, 'event_booked', `${EVENT_KINDS[d.kind]} booked for ${fmtWhen(e)}${e.contractor_company ? ` with ${e.contractor_company}` : ''}${people.length ? ` (${e.people.map((x) => x.name).join(', ')})` : ''}`);
       // booking it means the work has started: milestone in progress, and tick a "schedule…" step if there is one
       if (m && p.phase === 'pipeline') {
         const st = db.prepare('SELECT status FROM project_milestones WHERE project_id = ? AND milestone_id = ?').get(p.id, m.id)?.status || 'not_started';
         if (st === 'not_started') setMilestone(p.id, m, 'in_progress', req.user.id, null, t);
         ensureSteps(p.id, m.id);
-        const step = db.prepare("SELECT id FROM project_steps WHERE project_id = ? AND milestone_id = ? AND done_at IS NULL AND LOWER(label) LIKE '%schedul%' ORDER BY position LIMIT 1").get(p.id, m.id);
+        const step = db.prepare("SELECT id FROM project_steps WHERE project_id = ? AND milestone_id = ? AND done_at IS NULL AND (LOWER(label) LIKE '%schedul%' OR LOWER(label) LIKE 'book %') ORDER BY position LIMIT 1").get(p.id, m.id);
         if (step) db.prepare('UPDATE project_steps SET done_at = ?, done_by = ? WHERE id = ?').run(t, req.user.id, step.id);
+      }
+      if (d.kind === 'site_walk' && d.contractor_id) {
+        const q = db.prepare('SELECT * FROM quotes WHERE project_id = ? AND contractor_id = ?').get(p.id, d.contractor_id);
+        if (!q) db.prepare("INSERT INTO quotes (project_id, contractor_id, status, created_by) VALUES (?,?, 'walk_booked', ?)").run(p.id, d.contractor_id, req.user.id);
+        else if (q.status === 'requested') db.prepare("UPDATE quotes SET status = 'walk_booked', updated_at = ? WHERE id = ?").run(t, q.id);
       }
     }
     notify(people, { kind: 'calendar', projectId: p?.id, milestoneId: m?.id, actorId: req.user.id,
-      text: `${req.user.name} booked you for ${eventTitle(e)} on ${fmtWhen(e)}${e.location ? ` at ${e.location}` : ''}` });
+      text: `${req.user.name} booked ${eventTitle(e)}${e.contractor_company ? ` with ${e.contractor_company}` : ''} on ${fmtWhen(e)}${e.location ? ` at ${e.location}` : ''}` });
     return eid;
   })();
   res.status(201).json(getEvent(id));
@@ -1220,8 +1351,8 @@ app.patch('/api/events/:id', wrap((req, res) => {
   const people = 'people' in body ? peopleFrom(body) : before.people.map((x) => x.id);
   const starts = d.starts_at ?? before.starts_at; const ends = d.ends_at ?? before.ends_at;
   const moved = starts !== before.starts_at || ends !== before.ends_at;
-  if ((moved || 'people' in body) && (d.status ?? before.status) !== 'cancelled') {
-    const clash = conflictsFor(people, starts, ends, before.id);
+  if ((moved || 'people' in body || 'contractor_id' in body) && (d.status ?? before.status) !== 'cancelled') {
+    const clash = conflictsFor(people, starts, ends, before.id, 'contractor_id' in d ? d.contractor_id : before.contractor_id);
     if (clash.length && !body.force) throw new HttpError(409, 'Double-booked', { conflicts: clash });
   }
   db.transaction(() => {
@@ -1268,7 +1399,7 @@ app.get('/api/events/:id/ics', (req, res) => {
   const body = ['BEGIN:VCALENDAR', 'VERSION:2.0', 'PRODID:-//Evium//CRM//EN', 'BEGIN:VEVENT',
     `UID:evium-event-${e.id}@evium-crm`, `DTSTAMP:${stamp}`, `DTSTART:${dt(e.starts_at)}`, `DTEND:${dt(e.ends_at)}`,
     `SUMMARY:${ical(eventTitle(e))}`, e.location ? `LOCATION:${ical(e.location)}` : '',
-    `DESCRIPTION:${ical([e.code ? `${e.code} ${e.project_name}` : '', e.people.length ? `With: ${e.people.map((x) => x.name).join(', ')}` : '', e.notes || ''].filter(Boolean).join('\n'))}`,
+    `DESCRIPTION:${ical([e.code ? `${e.code} ${e.project_name}` : '', e.contractor_company ? `Electrician: ${e.contractor_company}${e.contractor_contact ? ` (${e.contractor_contact}` : ''}${e.contractor_phone ? `, ${e.contractor_phone}` : ''}${e.contractor_contact ? ')' : ''}` : '', e.people.length ? `Evium: ${e.people.map((x) => x.name).join(', ')}` : '', e.notes || ''].filter(Boolean).join('\n'))}`,
     e.status === 'cancelled' ? 'STATUS:CANCELLED' : 'STATUS:CONFIRMED', 'END:VEVENT', 'END:VCALENDAR'].filter(Boolean).join('\r\n');
   res.setHeader('Content-Type', 'text/calendar; charset=utf-8');
   res.setHeader('Content-Disposition', `attachment; filename="evium-${e.kind}-${e.id}.ics"`);
@@ -1398,6 +1529,14 @@ app.post('/api/projects/:id/documents', upload.array('files'), wrap((req, res) =
     const name = Buffer.from(f.originalname, 'latin1').toString('utf8');
     ins.run(p.id, ticketId, milestoneId, category, name, f.filename, f.mimetype, f.size, req.body.notes || null, req.user.id);
   }))();
+  if (req.body.quote_id) {
+    const q = db.prepare('SELECT * FROM quotes WHERE id = ? AND project_id = ?').get(Number(req.body.quote_id), p.id);
+    if (q) {
+      const docId = db.prepare('SELECT MAX(id) id FROM documents WHERE project_id = ?').get(p.id).id;
+      db.prepare(`UPDATE quotes SET document_id = ?, status = CASE WHEN status IN ('requested','walk_booked') THEN 'received' ELSE status END,
+        received_on = COALESCE(received_on, date('now')), updated_at = ? WHERE id = ?`).run(docId, now(), q.id);
+    }
+  }
   logActivity(p.id, req.user.id, 'documents_uploaded', `${files.length} file(s) · ${category}${ticketId ? ` · ticket #${ticketId}` : ''}`);
   db.prepare('UPDATE projects SET updated_at = ? WHERE id = ?').run(now(), p.id);
   res.status(201).json({ ok: true, count: files.length });

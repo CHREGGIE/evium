@@ -171,6 +171,8 @@ async function route() {
     else if (page === 'calendar') await renderCalendar();
     else if (page === 'team' && canSeeTeam()) { if (id) location.hash = `#/dashboard?as=${id}`; else await renderTeam(); }
     else if (page === 'rebates') await renderRebates();
+    else if (page === 'electricians' && id) await renderContractor(id);
+    else if (page === 'electricians') await renderContractors();
     else if (page === 'utilities' && id) await renderUtility(id);
     else if (page === 'utilities') await renderUtilities();
     else if (page === 'projects' && id && parts[2] === 'm' && parts[3]) await renderMilestone(id, parts[3]);
@@ -754,6 +756,7 @@ async function renderMilestone(pid, mid) {
     </div>
     <div class="cols-main">
       <div class="grid" style="gap:16px">
+        ${msBookKind(m) === 'site_walk' ? '<section class="card" id="quotesCard"><div class="work-empty">Loading quotes…</div></section>' : ''}
         <section class="card">
           <div class="card-head"><h2>Steps</h2><span class="muted small">${done} of ${steps.length} done</span></div>
           <div class="ms-progress big"><span style="width:${steps.length ? Math.round((done / steps.length) * 100) : 0}%"></span></div>
@@ -819,6 +822,7 @@ async function renderMilestone(pid, mid) {
   bindDocActions($('#msDocs'), again);
   $('#msRemind').onclick = () => reminderModal(p, m.id, again);
   $('#msBook').onclick = () => bookModal({ project: p, kind: msBookKind(m) }, again);
+  if ($('#quotesCard')) quotesSection(p, $('#quotesCard'), again).catch(() => {});
   api('GET', `/api/events?project_id=${p.id}&milestone_id=${m.id}&include_cancelled=1`).then((rows) => {
     const el = $('#msEvents'); if (!el) return;
     el.innerHTML = evList(rows, { empty: 'Nothing booked for this milestone.', showSite: false }); bindEvents(el, again);
@@ -838,12 +842,12 @@ const hhmm = (t) => { const [h, m] = t.split(':').map(Number); return `${((h + 1
 const evTime = (e) => { const [d1, t1] = e.starts_at.split('T'); const [d2, t2] = e.ends_at.split('T'); return d1 === d2 ? `${hhmm(t1)}–${hhmm(t2)}` : `${fdate(d1)} ${hhmm(t1)} – ${fdate(d2)} ${hhmm(t2)}`; };
 const evTitle = (e) => e.title || `${EVENT_KIND[e.kind]}${e.project_name ? `: ${e.project_name}` : ''}`;
 const evChip = (e, { showDate = false } = {}) => `<button type="button" class="ev ${e.status !== 'scheduled' ? `is-${e.status}` : ''}" data-ev="${e.id}" style="--ev:${EVENT_COLOR[e.kind]}" title="${esc(evTitle(e))} · ${esc(evTime(e))}">
-    <span class="ev-time">${showDate ? `${fdate(e.starts_at.slice(0, 10))} · ` : ''}${hhmm(e.starts_at.slice(11))}</span><span class="ev-name">${esc(e.project_name || e.title || EVENT_KIND[e.kind])}</span></button>`;
+    <span class="ev-time">${showDate ? `${fdate(e.starts_at.slice(0, 10))} · ` : ''}${hhmm(e.starts_at.slice(11))}</span><span class="ev-name">${esc(e.project_name || e.title || EVENT_KIND[e.kind])}</span>${e.contractor_company ? `<span class="ev-name muted">${esc(e.contractor_company)}</span>` : ''}</button>`;
 // a list of bookings (used on a site, a milestone and the dashboard)
 const evList = (rows, { empty = 'Nothing booked.', showSite = true } = {}) => (rows.length ? `<div class="ev-list">${rows.map((e) => `<button type="button" class="ev-row" data-ev="${e.id}">
     <span class="ev-bar" style="background:${EVENT_COLOR[e.kind]}"></span>
     <span class="ev-when"><b>${esc(fdate(e.starts_at.slice(0, 10)))}</b><span class="muted small">${esc(evTime(e))}</span></span>
-    <span class="ev-what"><b>${esc(EVENT_KIND[e.kind])}</b>${showSite && e.project_name ? ` · ${esc(e.address || e.project_name)}` : ''}<span class="muted small">${esc(e.people.map((x) => x.name).join(', ') || 'Nobody assigned')}</span></span>
+    <span class="ev-what"><b>${esc(EVENT_KIND[e.kind])}</b>${showSite && e.project_name ? ` · ${esc(e.address || e.project_name)}` : ''}<span class="muted small">${esc([e.contractor_company, ...e.people.map((x) => x.name)].filter(Boolean).join(' · ') || 'Nobody assigned')}</span></span>
   </button>`).join('')}</div>` : `<div class="work-empty">${esc(empty)}</div>`);
 const bindEvents = (root, after) => $$('[data-ev]', root).forEach((b) => (b.onclick = (e) => { e.stopPropagation(); eventModal(Number(b.dataset.ev), after); }));
 
@@ -922,7 +926,8 @@ async function bookModal(preset = {}, after) {
       <label>Start time<input type="time" name="start_time" required value="${t1}"></label>
       <label>End date<input type="date" name="end_date" required value="${date}"></label>
       <label>End time<input type="time" name="end_time" required value="${t2}"></label>
-      <fieldset class="checkset full"><legend>Who's going</legend>
+      <label class="span2" id="bkElecWrap">Electrician<span class="input-row"><select name="contractor_id"></select><button type="button" class="btn sm" id="bkNewElec">+ New</button></span></label>
+      <fieldset class="checkset full"><legend>Evium team (it goes on their calendar and they're notified)</legend>
         ${people.map((u) => `<label><input type="checkbox" name="u_${u.id}"> ${esc(u.name)}${u.title ? ` <span class="muted">${esc(u.title)}</span>` : ''}</label>`).join('')}</fieldset>
       <label class="full">Location<input name="location" placeholder="The site's address is used if left blank"></label>
       <label class="full">Title (optional)<input name="title" placeholder="e.g. Site walk with the owner"></label>
@@ -942,10 +947,29 @@ async function bookModal(preset = {}, after) {
     if (!ids.size) ids.add(S.me.id);
     ids.forEach((id) => { const c = $(`[name=u_${id}]`, card); if (c) c.checked = true; });
   };
-  preTick();
-  $('[name=project_id]', card).addEventListener('change', preTick);
+  // electrician list follows the site's state; installations default to the electrician chosen from the quotes
+  let elecSel = preset.contractor_id ? String(preset.contractor_id) : '';
+  const drawElec = () => {
+    const pid = Number($('[name=project_id]', card).value) || preset.project?.id;
+    const site = sites.find((x) => x.id === pid);
+    const k = $('[name=kind]', card).value;
+    $('#bkElecWrap', card).style.display = k === 'meeting' ? 'none' : '';
+    if (!elecSel && site?.contractor_id && k !== 'site_walk') elecSel = String(site.contractor_id);
+    const list = contractorsFor(site?.state);
+    $('[name=contractor_id]', card).innerHTML = `<option value="">${k === 'site_walk' ? '— pick the electrician doing the walk —' : '— none —'}</option>`
+      + list.map((c) => `<option value="${c.id}" ${String(c.id) === elecSel ? 'selected' : ''}>${esc(c.company)}${c.contact_name ? ` · ${esc(c.contact_name)}` : ''}</option>`).join('');
+  };
+  $('[name=contractor_id]', card).addEventListener('change', (e) => { elecSel = e.target.value; });
+  $('#bkNewElec', card).onclick = () => {
+    const name = prompt('Electrician company name:'); if (!name || !name.trim()) return;
+    const site = sites.find((x) => x.id === (Number($('[name=project_id]', card).value) || preset.project?.id));
+    api('POST', '/api/contractors', { company: name.trim(), states: site?.state ? [site.state] : [] })
+      .then(async (c) => { await loadMeta(); elecSel = String(c.id); drawElec(); toast(`Added ${c.company}`); }).catch(fail);
+  };
+  preTick(); drawElec();
+  $('[name=project_id]', card).addEventListener('change', () => { preTick(); elecSel = ''; drawElec(); });
   $('[name=kind]', card).addEventListener('change', (e) => {
-    const [a, b] = defaultTimes(e.target.value); $('[name=start_time]', card).value = a; $('[name=end_time]', card).value = b; preTick();
+    const [a, b] = defaultTimes(e.target.value); $('[name=start_time]', card).value = a; $('[name=end_time]', card).value = b; preTick(); drawElec();
   });
   $('[name=start_date]', card).addEventListener('change', (e) => { if ($('[name=end_date]', card).value < e.target.value) $('[name=end_date]', card).value = e.target.value; });
   form.addEventListener('submit', async (ev) => {
@@ -953,6 +977,7 @@ async function bookModal(preset = {}, after) {
     const f = formData(form);
     const body = {
       kind: f.kind, project_id: preset.project?.id || f.project_id || null, title: f.title, location: f.location, notes: f.notes,
+      contractor_id: f.kind === 'meeting' ? null : f.contractor_id || null,
       starts_at: `${f.start_date}T${f.start_time}`, ends_at: `${f.end_date}T${f.end_time}`,
       people: Object.keys(f).filter((k) => k.startsWith('u_')).map((k) => Number(k.slice(2))),
     };
@@ -981,13 +1006,16 @@ async function eventModal(id, after) {
       <h2 style="margin:0"><span class="ms-dot" style="background:${EVENT_COLOR[e.kind]};display:inline-block;margin-right:8px"></span>${esc(evTitle(e))}</h2>
       <div class="muted small" style="margin-top:4px">${esc(EVENT_KIND[e.kind])} · ${esc(fdate(sd))} · ${esc(evTime(e))}${e.status !== 'scheduled' ? ` · <b>${esc(label(e.status))}</b>` : ''}</div></div>
       <button class="x" data-close aria-label="Close">×</button></div>
+    ${e.contractor_company ? `<div class="ev-elec"><div><b>${esc(e.contractor_company)}</b><div class="muted small">${esc([e.contractor_contact, e.contractor_phone].filter(Boolean).join(' · '))}</div></div>
+      ${e.contractor_email ? `<a class="btn sm" href="mailto:${esc(e.contractor_email)}?subject=${encodeURIComponent(`${EVENT_KIND[e.kind]}: ${e.address || e.project_name || ''} on ${fdate(sd)}`)}&body=${encodeURIComponent(`Hi${e.contractor_contact ? ` ${e.contractor_contact.split(' ')[0]}` : ''},\n\nConfirming the ${EVENT_KIND[e.kind].toLowerCase()} on ${fdate(sd)}, ${evTime(e)}.\nAddress: ${e.location || ''}\n${e.notes ? `Notes: ${e.notes}\n` : ''}\nThanks,\n${S.me.name}\nEvium`)}">Email the electrician</a>` : ''}</div>` : ''}
     ${e.project_id ? `<p style="margin-top:0"><a href="#/projects/${e.project_id}" id="evSite">${esc(e.code)} · ${esc(e.address || e.project_name)}${e.city ? `, ${esc(e.city)}` : ''} ›</a>${e.milestone ? ` <span class="muted small">(${esc(e.milestone)})</span>` : ''}</p>` : ''}
     <form class="form-grid">
       <label>Start date<input type="date" name="start_date" value="${sd}" required></label>
       <label>Start time<input type="time" name="start_time" value="${st}" required></label>
       <label>End date<input type="date" name="end_date" value="${ed}" required></label>
       <label>End time<input type="time" name="end_time" value="${et}" required></label>
-      <fieldset class="checkset full"><legend>Who's going</legend>
+      ${e.kind !== 'meeting' ? `<label class="full">Electrician<select name="contractor_id">${options(contractorsFor(e.state).concat(e.contractor_id && !contractorsFor(e.state).some((c) => c.id === e.contractor_id) ? [contractorById(e.contractor_id)].filter(Boolean) : []).map((c) => [c.id, c.company]), e.contractor_id || '', { blank: '— none —' })}</select></label>` : ''}
+      <fieldset class="checkset full"><legend>Evium team</legend>
         ${people.map((u) => `<label><input type="checkbox" name="u_${u.id}" ${e.people.some((x) => x.id === u.id) ? 'checked' : ''}> ${esc(u.name)}</label>`).join('')}</fieldset>
       <label class="full">Location<input name="location" value="${esc(e.location)}"></label>
       <label class="full">Notes<textarea name="notes" rows="3">${esc(e.notes)}</textarea></label>
@@ -1020,7 +1048,194 @@ async function eventModal(id, after) {
     ev.preventDefault();
     const f = formData(ev.target);
     patch({ starts_at: `${f.start_date}T${f.start_time}`, ends_at: `${f.end_date}T${f.end_time}`, location: f.location, notes: f.notes,
+      ...('contractor_id' in f ? { contractor_id: f.contractor_id || null } : {}),
       people: Object.keys(f).filter((k) => k.startsWith('u_')).map((k) => Number(k.slice(2))) }, 'Booking saved');
+  });
+}
+
+// ---------- electricians (outside contractors: they do the site walks and quote the job) ----------
+const contractorById = (id) => S.meta.contractors.find((c) => c.id === Number(id));
+const contractorsFor = (state) => S.meta.contractors.filter((c) => c.active && (!state || !c.states || String(c.states).split(',').includes(state)));
+const QUOTE_STATUS = { requested: 'Asked for a quote', walk_booked: 'Site walk booked', received: 'Quote received', selected: 'Chosen', declined: 'Not chosen' };
+
+async function renderContractors() {
+  const q = qs();
+  const f = { q: (q.get('q') || '').toLowerCase(), state: q.get('state') || '' };
+  const all = await api('GET', '/api/contractors');
+  let rows = all;
+  if (f.state) rows = rows.filter((c) => !c.states || String(c.states).split(',').includes(f.state));
+  if (f.q) rows = rows.filter((c) => [c.company, c.contact_name, c.email, c.notes].join(' ').toLowerCase().includes(f.q));
+  view.innerHTML = `
+    <div class="page-head"><h1>Electricians <span class="muted small">${rows.length}</span></h1>
+      <div class="actions"><button class="btn primary" id="newContractor">+ Add electrician</button></div></div>
+    <p class="muted small" style="margin-top:-8px">The electricians who walk our sites and quote the jobs. Project managers usually book three per site and choose the best quote.</p>
+    <form class="filters" id="cFilters">
+      <input type="search" name="q" placeholder="Search company, contact, email…" value="${esc(q.get('q') || '')}">
+      <select name="state">${options(CORE_STATES.map((s) => [s, `${s} · ${stateName(s)}`]), f.state, { blank: 'All states' })}</select>
+    </form>
+    <div class="table-wrap"><table><thead><tr><th>Electrician</th><th>States</th><th>Contact</th><th>Quotes</th><th>Jobs won</th><th>Upcoming walks</th></tr></thead>
+    <tbody>${rows.map((c) => `<tr class="clickable ${c.active ? '' : 'inactive'}" data-href="#/electricians/${c.id}">
+      <td><b>${esc(c.company)}</b>${c.active ? '' : ' <span class="badge">Inactive</span>'}${c.license ? `<div class="muted small">License ${esc(c.license)}</div>` : ''}</td>
+      <td>${esc((c.states || 'Any').replace(/,/g, ', '))}</td>
+      <td>${esc(c.contact_name || '—')}<div class="muted small">${esc([c.phone, c.email].filter(Boolean).join(' · '))}</div></td>
+      <td>${c.quote_count || '—'}</td><td>${c.won_count || '—'}</td><td>${c.upcoming || '—'}</td></tr>`).join('') || '<tr><td colspan="6" class="empty">No electricians yet.</td></tr>'}</tbody></table></div>`;
+  const form = $('#cFilters');
+  const go = () => { const p = new URLSearchParams(); Object.entries(formData(form)).forEach(([k, v]) => v && p.set(k, v)); location.hash = `#/electricians?${p}`; };
+  $('select', form).onchange = go;
+  let t; $('input', form).addEventListener('input', () => { clearTimeout(t); t = setTimeout(go, 350); });
+  form.addEventListener('submit', (e) => { e.preventDefault(); go(); });
+  $('#newContractor').onclick = () => contractorForm();
+  bindRowLinks();
+  const qi = $('input', form); if (f.q) { qi.focus(); qi.setSelectionRange(qi.value.length, qi.value.length); }
+}
+
+async function renderContractor(id) {
+  const c = await api('GET', `/api/contractors/${id}`);
+  $$('[data-nav]').forEach((a) => a.classList.toggle('active', a.dataset.nav === 'electricians'));
+  const amounts = c.quotes.filter((x) => x.amount != null);
+  view.innerHTML = `
+    <div class="page-head"><div><div class="muted small"><a href="#/electricians">Electricians</a> / ${esc(c.company)}</div><h1>${esc(c.company)}${c.active ? '' : ' <span class="badge">Inactive</span>'}</h1>
+      <div class="muted small" style="margin-top:4px">${esc((c.states || 'Any state').replace(/,/g, ', '))} · ${c.quote_count} quote${c.quote_count === 1 ? '' : 's'} · ${c.won_count} won${amounts.length ? ` · average ${money(amounts.reduce((a, x) => a + x.amount, 0) / amounts.length)}` : ''}</div></div>
+      <div class="actions"><button class="btn" id="editContractor">Edit</button></div></div>
+    <div class="cols-main">
+      <div class="grid" style="gap:16px">
+        <section class="card"><h2>Quotes</h2>
+          ${c.quotes.length ? `<div class="work-list">${c.quotes.map((x) => `<a class="work-row" href="#/projects/${x.project_id}">${workSite({ ...x, name: x.project_name })}
+            <span class="work-meta">${x.amount != null ? `<b>${money(x.amount)}</b>` : ''}<span class="qpill q-${x.status}">${esc(QUOTE_STATUS[x.status])}</span></span><span class="work-chev">›</span></a>`).join('')}</div>` : '<div class="work-empty">No quotes yet.</div>'}</section>
+        <section class="card"><h2>Bookings</h2>
+          ${c.events.length ? `<div class="work-list">${c.events.map((e) => `<button type="button" class="work-row as-btn" data-ev="${e.id}"><span class="work-site"><b>${esc(EVENT_KIND[e.kind])} · ${esc(e.address || e.project_name || '')}</b><span class="muted small">${esc(fdate(e.starts_at.slice(0, 10)))} ${esc(evTime(e))}</span></span>
+            <span class="work-meta">${e.status !== 'scheduled' ? esc(label(e.status)) : ''}</span><span class="work-chev">›</span></button>`).join('')}</div>` : '<div class="work-empty">Nothing booked.</div>'}</section>
+      </div>
+      <div class="card"><h2>Details</h2><dl class="kv">
+        <dt>Contact</dt><dd>${esc(c.contact_name || '—')}</dd>
+        <dt>Phone</dt><dd>${c.phone ? `<a href="tel:${esc(c.phone)}">${esc(c.phone)}</a>` : '—'}</dd>
+        <dt>Email</dt><dd>${c.email ? `<a href="mailto:${esc(c.email)}">${esc(c.email)}</a>` : '—'}</dd>
+        <dt>States</dt><dd>${esc((c.states || 'Any').replace(/,/g, ', '))}</dd>
+        <dt>License</dt><dd>${esc(c.license || '—')}</dd>
+      </dl>${c.notes ? `<h3 style="margin-top:14px">Notes</h3><div style="white-space:pre-wrap">${esc(c.notes)}</div>` : ''}</div>
+    </div>`;
+  $('#editContractor').onclick = () => contractorForm(c);
+  bindEvents(view, () => renderContractor(id));
+}
+
+function contractorForm(c = null, after) {
+  const v = c || { active: 1 };
+  const card = openModal(`${modalHead(c ? `Edit ${esc(c.company)}` : 'Add electrician')}
+    <form class="form-grid">
+      <label class="full">Company *<input name="company" required value="${esc(v.company)}" placeholder="e.g. Garden State Electric"></label>
+      <label>Contact name<input name="contact_name" value="${esc(v.contact_name)}"></label>
+      <label>Phone<input name="phone" value="${esc(v.phone)}"></label>
+      <label>Email<input name="email" type="email" value="${esc(v.email)}"></label>
+      <label>License #<input name="license" value="${esc(v.license)}"></label>
+      <fieldset class="checkset full"><legend>States they work in (none = any)</legend>
+        ${CORE_STATES.map((s) => `<label><input type="checkbox" name="st_${s}" ${String(v.states || '').split(',').includes(s) ? 'checked' : ''}> ${s}</label>`).join('')}</fieldset>
+      <label class="full">Notes<textarea name="notes" placeholder="Strengths, typical turnaround, who to call…">${esc(v.notes)}</textarea></label>
+      ${c ? `<label class="full check-inline"><input type="checkbox" name="active" ${v.active ? 'checked' : ''}> Active (shown when booking site walks)</label>` : ''}
+      <div class="modal-foot full" style="justify-content:space-between">
+        <span>${c ? '<button type="button" class="btn danger" id="delContractor">Delete</button>' : ''}</span>
+        <span style="display:flex;gap:8px"><button type="button" class="btn" data-close>Cancel</button><button class="btn primary">${c ? 'Save' : 'Add electrician'}</button></span></div>
+    </form>`, { wide: true });
+  $('form', card).addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const d = formData(e.target);
+    d.states = Object.keys(d).filter((k) => k.startsWith('st_')).map((k) => k.slice(3));
+    Object.keys(d).filter((k) => k.startsWith('st_')).forEach((k) => delete d[k]);
+    if (c) d.active = !!d.active;
+    try {
+      const saved = c ? await api('PATCH', `/api/contractors/${c.id}`, d) : await api('POST', '/api/contractors', d);
+      await loadMeta(); modalClose = null; closeModal(); toast('Electrician saved');
+      if (after) after(saved); else if (c) route(); else location.hash = `#/electricians/${saved.id}`;
+    } catch (err) { fail(err); }
+  });
+  $('#delContractor', card)?.addEventListener('click', async () => {
+    if (!confirm(`Delete ${c.company}?`)) return;
+    try { await api('DELETE', `/api/contractors/${c.id}`); await loadMeta(); modalClose = null; closeModal(); toast('Deleted'); location.hash = '#/electricians'; } catch (err) { fail(err); }
+  });
+}
+
+// ---------- electrical quotes on a site (on the Site walk & proposal page) ----------
+async function quotesSection(p, el, again) {
+  const rows = await api('GET', `/api/projects/${p.id}/quotes`);
+  const live = rows.filter((x) => x.status !== 'declined');
+  const priced = live.filter((x) => x.amount != null);
+  const low = priced.length > 1 ? Math.min(...priced.map((x) => x.amount)) : null;
+  const chosen = rows.find((x) => x.status === 'selected');
+  const used = new Set(rows.map((x) => x.contractor_id));
+  const avail = contractorsFor(p.state).filter((c) => !used.has(c.id));
+  el.innerHTML = `
+    <div class="card-head"><h2>Electrical quotes <span class="work-n">${rows.length}</span></h2><span class="muted small">Book up to 3 electricians, then choose the best quote</span></div>
+    ${chosen ? `<div class="note-ok small">Chosen: <b>${esc(chosen.company)}</b>${chosen.amount != null ? ` · ${money(chosen.amount)}` : ''}. They'll be suggested when you book the installation.</div>` : ''}
+    ${rows.length ? `<div class="quotes">${rows.map((x) => `<div class="quote ${x.status === 'selected' ? 'is-chosen' : ''} ${x.status === 'declined' ? 'is-declined' : ''}">
+        <div class="q-who"><a href="#/electricians/${x.contractor_id}"><b>${esc(x.company)}</b></a>
+          <span class="muted small">${esc([x.contact_name, x.phone].filter(Boolean).join(' · ') || 'No contact on file')}</span></div>
+        <div class="q-walk small">${x.walk_at ? `<button type="button" class="link-btn" data-ev="${x.walk_id}">Walk ${esc(fdate(x.walk_at.slice(0, 10)))} ${esc(hhmm(x.walk_at.slice(11)))}${x.walk_status === 'done' ? ' ✓' : ''}</button>`
+          : x.status === 'declined' ? '<span class="muted">—</span>' : `<button type="button" class="btn sm" data-qbook="${x.contractor_id}">Book site walk</button>`}</div>
+        <div class="q-amt">${x.amount != null ? `<b>${money(x.amount)}</b>${low != null && x.amount === low && x.status !== 'declined' ? ' <span class="low">Lowest</span>' : ''}` : '<span class="muted small">No quote yet</span>'}
+          ${x.received_on ? `<div class="muted small">received ${esc(fdate(x.received_on))}</div>` : ''}
+          ${x.document_id ? `<div class="small"><a href="/api/documents/${x.document_id}/download?inline=1" target="_blank" rel="noopener">${esc(x.document_name || 'Quote file')} ↗</a></div>` : ''}</div>
+        <div class="q-status"><span class="qpill q-${x.status}">${esc(QUOTE_STATUS[x.status])}</span></div>
+        <div class="q-act">
+          ${x.status === 'declined' ? '' : `<button type="button" class="btn sm" data-qedit="${x.id}">${x.amount != null ? 'Edit quote' : 'Enter quote'}</button>`}
+          ${['received'].includes(x.status) ? `<button type="button" class="btn sm primary" data-qpick="${x.id}">Choose</button>` : ''}
+          <button type="button" class="q-del" data-qdel="${x.id}" title="Remove" aria-label="Remove ${esc(x.company)}">×</button></div>
+        ${x.scope ? `<div class="q-scope small">${esc(x.scope)}</div>` : ''}
+      </div>`).join('')}</div>` : '<div class="work-empty">No electricians on this site yet.</div>'}
+    <div class="q-add">
+      <select id="qAddSel" ${avail.length ? '' : 'disabled'}>${avail.length ? avail.map((c) => `<option value="${c.id}">${esc(c.company)}${c.states ? ` (${esc(c.states)})` : ''}</option>`).join('') : `<option>No more electricians for ${esc(p.state || 'this state')}</option>`}</select>
+      <button type="button" class="btn sm" id="qAdd" ${avail.length ? '' : 'disabled'}>Add electrician</button>
+      <button type="button" class="btn sm" id="qAddBook" ${avail.length ? '' : 'disabled'}>Add and book site walk</button>
+      <button type="button" class="link-btn small" id="qNewC">+ New electrician</button>
+    </div>`;
+  const reload = () => quotesSection(p, el, again);
+  const add = async (book) => {
+    const cid = Number($('#qAddSel', el).value);
+    try {
+      if (book) bookModal({ project: p, kind: 'site_walk', contractor_id: cid }, () => { reload(); again?.(); });
+      else { await api('POST', `/api/projects/${p.id}/quotes`, { contractor_id: cid }); reload(); }
+    } catch (err) { fail(err); }
+  };
+  $('#qAdd', el).onclick = () => add(false);
+  $('#qAddBook', el).onclick = () => add(true);
+  $('#qNewC', el).onclick = () => contractorForm(null, () => reload());
+  $$('[data-qbook]', el).forEach((b) => (b.onclick = () => bookModal({ project: p, kind: 'site_walk', contractor_id: Number(b.dataset.qbook) }, () => { reload(); again?.(); })));
+  $$('[data-qedit]', el).forEach((b) => (b.onclick = () => quoteModal(p, rows.find((x) => String(x.id) === b.dataset.qedit), reload)));
+  $$('[data-qpick]', el).forEach((b) => (b.onclick = async () => {
+    const x = rows.find((r) => String(r.id) === b.dataset.qpick);
+    if (!confirm(`Choose ${x.company}${x.amount != null ? ` at ${money(x.amount)}` : ''}? The other quotes will be marked "not chosen".`)) return;
+    try { await api('POST', `/api/quotes/${x.id}/select`); toast(`${x.company} chosen`); again ? again() : reload(); } catch (err) { fail(err); }
+  }));
+  $$('[data-qdel]', el).forEach((b) => (b.onclick = async () => {
+    const x = rows.find((r) => String(r.id) === b.dataset.qdel);
+    if (!confirm(`Remove ${x.company} from this site's quotes?`)) return;
+    try { await api('DELETE', `/api/quotes/${x.id}`); reload(); } catch (err) { fail(err); }
+  }));
+  bindEvents(el, reload);
+}
+
+function quoteModal(p, x, after) {
+  const card = openModal(`${modalHead(`Quote from ${esc(x.company)}`)}
+    <form class="form-grid">
+      <label>Amount (USD)<input name="amount" type="number" min="0" step="any" value="${esc(x.amount)}" placeholder="e.g. 48500"></label>
+      <label>Received on<input name="received_on" type="date" value="${esc(x.received_on || today())}"></label>
+      <label class="full">Scope / what's included<textarea name="scope" rows="3" placeholder="e.g. 10 L2 ports, new 400A panel, trenching 120 ft">${esc(x.scope)}</textarea></label>
+      <label class="full">Notes<textarea name="notes" rows="2">${esc(x.notes)}</textarea></label>
+      <label class="full">Quote file ${x.document_id ? `<span class="muted" style="font-weight:500">(replaces ${esc(x.document_name || 'the current file')})</span>` : ''}<input type="file" name="file" accept=".pdf,image/*,.doc,.docx,.xls,.xlsx"></label>
+      <div class="modal-foot full"><button type="button" class="btn" data-close>Cancel</button><button class="btn primary">Save quote</button></div>
+    </form>`);
+  $('form', card).addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const f = formData(e.target);
+    try {
+      await api('PATCH', `/api/quotes/${x.id}`, { amount: f.amount, received_on: f.received_on, scope: f.scope, notes: f.notes });
+      const file = $('[name=file]', card).files[0];
+      if (file) {
+        const fd = new FormData(); fd.append('files', file); fd.append('category', 'electrical_quote'); fd.append('quote_id', x.id);
+        const sw = siteWalkMs(); if (sw) fd.append('milestone_id', sw.id);
+        fd.append('notes', `Quote from ${x.company}`);
+        await api('POST', `/api/projects/${p.id}/documents`, fd);
+      }
+      modalClose = null; closeModal(); toast('Quote saved'); after?.();
+    } catch (err) { fail(err); }
   });
 }
 
@@ -1266,7 +1481,7 @@ function dutiesModal() {
 }
 
 function activityItem(a) {
-  const icons = { event_booked: '📅', sent_to_review: '★', assessed: '★', review_info: '?', review_passed: '✕', reopened: '↺', step_done: '✓', reminder_set: '⏰', message: '💬', milestone_updated: '🏁', moved_to_pipeline: '✅', project_created: '🆕', stage_changed: '➡️', status_changed: '🚦', project_updated: '✏️', ticket_created: '🎫', ticket_updated: '🎫', ticket_deleted: '🗑️', documents_uploaded: '📎', document_deleted: '🗑️', note: '📝' };
+  const icons = { quote: '$', event_booked: '📅', sent_to_review: '★', assessed: '★', review_info: '?', review_passed: '✕', reopened: '↺', step_done: '✓', reminder_set: '⏰', message: '💬', milestone_updated: '🏁', moved_to_pipeline: '✅', project_created: '🆕', stage_changed: '➡️', status_changed: '🚦', project_updated: '✏️', ticket_created: '🎫', ticket_updated: '🎫', ticket_deleted: '🗑️', documents_uploaded: '📎', document_deleted: '🗑️', note: '📝' };
   const proj = a.project_name ? ` <a href="#/projects/${a.project_id}">${esc(a.code)}</a>` : '';
   const body = a.action === 'note' ? `<div class="note">${esc(a.detail)}</div>` : `<span>${esc(a.detail || '')}</span>`;
   return `<div class="feed-item">${icons[a.action] || '•'} <b>${esc(a.user_name || 'System')}</b> <span class="muted">${esc(label(a.action))}</span>${proj}
@@ -1873,6 +2088,7 @@ async function renderProject(id) {
           <dt>Property owner</dt><dd>${esc(p.property_owner || '—')}</dd>
           <dt>Owner contact</dt><dd>${esc(p.property_owner_contact || '—')}</dd>
           <dt>Utility</dt><dd>${p.utility_id ? `<a href="#/utilities/${p.utility_id}">${esc(p.utility_company)}</a>` : esc(p.utility_company || '—')}</dd>
+          ${p.phase === 'pipeline' ? `<dt>Electrician</dt><dd>${p.contractor_id && contractorById(p.contractor_id) ? `<a href="#/electricians/${p.contractor_id}">${esc(contractorById(p.contractor_id).company)}</a>` : `<a href="${msHref(p.id, siteWalkMs()?.id)}">Quotes ›</a>`}</dd>` : ''}
           <dt>Rebate</dt><dd>${p.rebates.map((r, i) => rebateLine(r, i === 0 && p.rebate_amount ? `expected ${money(p.rebate_amount)}` : '')).join('')}${p.rebate_program ? `<div class="small">${esc(p.rebate_program)}</div>` : ''}${!p.rebates.length && !p.rebate_program ? '—' : ''}</dd>
           <dt>Tax credit</dt><dd>${p.tax_credit_id ? rebateLine(S.meta.rebates.find((r) => r.id === p.tax_credit_id) || { id: p.tax_credit_id, name: 'Tax credit' },
             `${{ yes: 'eligible', no: 'not eligible', unknown: 'eligibility not checked' }[p.tax_credit_eligible || 'unknown']}${p.tax_credit_amount ? `, est. ${money(p.tax_credit_amount)}` : ''}`) : '—'}</dd>

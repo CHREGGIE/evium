@@ -263,6 +263,33 @@ if (seedPipeline) db.transaction(() => {
     insMsg.run(pi, m?.id ?? null, m?.name ?? null, siteOwner(pi), body, ago);
   });
 
+  // electricians who walk the sites and quote (fictional demo companies)
+  const ELECTRICIANS = [
+    ['Empire Electric Co.', 'Tony Russo', '718-555-0141', 'NY'], ['Five Boroughs Electrical', 'Maria Lopez', '212-555-0162', 'NY'], ['Hudson Valley Power', 'Sean Doyle', '914-555-0119', 'NY'],
+    ['Garden State Electric', 'Raj Mehta', '201-555-0177', 'NJ,PA'], ['Shoreline Electrical', 'Kate Murphy', '203-555-0150', 'CT,RI,MA'], ['Keystone Power Co.', 'Dan Kowalski', '215-555-0133', 'PA,NJ'],
+    ['Lone Star Electric', 'Carlos Vega', '512-555-0108', 'TX'], ['Bluebonnet Electrical', 'Amy Nguyen', '214-555-0126', 'TX,AR,NM'], ['Gulf Coast Power Pros', 'Ray Thibodeaux', '713-555-0171', 'TX,FL,GA'],
+    ['Windy City Electric', 'Mike Kowal', '312-555-0187', 'IL,OH'], ['Prairie Electrical Contractors', 'Beth Larson', '630-555-0145', 'IL'],
+  ];
+  const cid = {};
+  const insC = db.prepare('INSERT INTO contractors (company, contact_name, phone, email, states, notes, updated_by) VALUES (?,?,?,?,?,?,?)');
+  ELECTRICIANS.forEach(([company, contact, phone, states]) => {
+    cid[company] = insC.run(company, contact, phone, `${contact.split(' ')[0].toLowerCase()}@${company.toLowerCase().replace(/[^a-z]+/g, '')}.example`, states, 'Demo electrician.', admin).lastInsertRowid;
+  });
+  // quotes: [project, company, status, amount, days ago received]
+  const insQ = db.prepare(`INSERT INTO quotes (project_id, contractor_id, status, amount, scope, received_on, created_by)
+    VALUES (?,?,?,?,?, CASE WHEN ? IS NULL THEN NULL ELSE date('now', ?) END, ?)`);
+  [
+    [9, 'Garden State Electric', 'walk_booked', null, null], [9, 'Keystone Power Co.', 'received', 61200, 4], [9, 'Shoreline Electrical', 'received', 54800, 2],
+    [3, 'Empire Electric Co.', 'declined', 92500, 30], [3, 'Five Boroughs Electrical', 'selected', 81900, 28], [3, 'Hudson Valley Power', 'declined', 88000, 27],
+    [5, 'Lone Star Electric', 'walk_booked', null, null], [5, 'Bluebonnet Electrical', 'requested', null, null],
+    [1, 'Lone Star Electric', 'selected', 46500, 70], [1, 'Bluebonnet Electrical', 'declined', 51200, 69],
+  ].forEach(([pi, co, status, amount, ago]) => {
+    if (!db.prepare('SELECT 1 FROM projects WHERE id = ?').get(pi)) return;
+    insQ.run(pi, cid[co], status, amount, amount ? 'Level 2 chargers, new panel and conduit run (demo quote)' : null, ago ?? null, `-${ago ?? 0} days`, admin);
+    if (status === 'selected') db.prepare('UPDATE projects SET contractor_id = ? WHERE id = ?').run(cid[co], pi);
+  });
+  const quoteElec = { 9: 'Garden State Electric', 5: 'Lone Star Electric', 6: 'Gulf Coast Power Pros', 7: 'Shoreline Electrical', 13: 'Five Boroughs Electrical' };
+
   // calendar bookings around today: [project, type, days from today, start, end, extra days it runs, status, notes]
   const insEv = db.prepare(`INSERT INTO events (project_id, milestone_id, kind, starts_at, ends_at, location, notes, status, created_by)
     VALUES (?,?,?, strftime('%Y-%m-%d', 'now', ?) || 'T' || ?, strftime('%Y-%m-%d', 'now', ?) || 'T' || ?, ?,?,?,?)`);
@@ -282,6 +309,7 @@ if (seedPipeline) db.transaction(() => {
     const loc = [p.address, p.city, p.state, p.zip].filter(Boolean).join(', ');
     const eid = insEv.run(pi, mid, kind, `${d >= 0 ? '+' : ''}${d} days`, t1, `${d + extra >= 0 ? '+' : ''}${d + extra} days`, t2, loc, notes, status, admin).lastInsertRowid;
     insEP.run(eid, p.owner_id || admin);
+    if (quoteElec[pi] && kind !== 'meeting') db.prepare('UPDATE events SET contractor_id = ? WHERE id = ?').run(cid[quoteElec[pi]], eid);
     if (kind === 'meeting') insEP.run(eid, admin);
   });
 

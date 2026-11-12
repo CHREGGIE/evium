@@ -424,6 +424,43 @@ CREATE TABLE IF NOT EXISTS event_people (
 CREATE INDEX IF NOT EXISTS idx_event_people_user ON event_people(user_id);
 `);
 
+// ---------- electricians (outside contractors who do the site walks and quote the job) ----------
+db.exec(`
+CREATE TABLE IF NOT EXISTS contractors (
+  id INTEGER PRIMARY KEY,
+  company TEXT NOT NULL,
+  contact_name TEXT,
+  phone TEXT,
+  email TEXT,
+  states TEXT,             -- e.g. "NY,NJ"
+  license TEXT,
+  notes TEXT,
+  active INTEGER NOT NULL DEFAULT 1,
+  updated_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+-- one quote per electrician per site. status: requested · walk_booked · received · selected · declined
+CREATE TABLE IF NOT EXISTS quotes (
+  id INTEGER PRIMARY KEY,
+  project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  contractor_id INTEGER NOT NULL REFERENCES contractors(id) ON DELETE CASCADE,
+  status TEXT NOT NULL DEFAULT 'requested' CHECK (status IN ('requested','walk_booked','received','selected','declined')),
+  amount REAL,
+  scope TEXT,
+  received_on TEXT,
+  document_id INTEGER REFERENCES documents(id) ON DELETE SET NULL,
+  notes TEXT,
+  created_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+  UNIQUE (project_id, contractor_id)
+);
+CREATE INDEX IF NOT EXISTS idx_quotes_project ON quotes(project_id);
+`);
+addColumns('events', { contractor_id: 'INTEGER REFERENCES contractors(id) ON DELETE SET NULL' });
+addColumns('projects', { contractor_id: 'INTEGER REFERENCES contractors(id) ON DELETE SET NULL' }); // the electrician chosen for the job
+
 // ---------- milestone steps ----------
 // Each milestone has a default checklist of steps (edited in Admin). A project gets its own copy
 // the first time that milestone is opened, so a site can add or remove steps without affecting others.
@@ -449,15 +486,28 @@ CREATE INDEX IF NOT EXISTS idx_psteps ON project_steps(project_id, milestone_id,
 addColumns('documents', { milestone_id: 'INTEGER REFERENCES milestones(id) ON DELETE SET NULL' });
 
 const DEFAULT_STEPS = {
-  'Site walk & proposal': ['Schedule the site walk with the owner', 'Photos of the parking area', 'Photos of the electrical room and panel',
-    'Note panel size and spare capacity', 'Measure distance from panel to charger spots', 'Write up site walk notes',
-    'Draft charger layout', 'Get electrical quote', 'Confirm rebate amount', 'Create and price the proposal'],
+  'Site walk & proposal': ['Book site walks with up to 3 electricians', 'Site walks done', 'Collect the electrical quotes', 'Pick the best quote',
+    'Draft charger layout', 'Confirm rebate amount', 'Create and price the proposal'],
   'Send proposal': ['Review the proposal', 'Send proposal to customer', 'Follow up with customer', 'Customer feedback / revisions', 'Customer accepts proposal'],
   'Contract': ['Draft contract', 'Agree terms with customer', 'Customer signs', 'Evium countersigns', 'Deposit received'],
   'Permitting': ['Electrical drawings / single-line diagram', 'Load calculation', 'Submit permit application', 'Answer plan review comments', 'Permit approved'],
   'Approvals': ['Submit utility application', 'Utility approval and energization date', 'Property owner / landlord approval', 'Submit rebate application', 'Rebate pre-approval received'],
   'Installation': ['Order equipment', 'Schedule electrician', 'Trenching and conduit', 'Mount and wire chargers', 'Pass inspection', 'Commission chargers on the network', 'Customer walkthrough and handoff'],
 };
+// one-time: the site walk steps change to electricians walking and quoting (only if they're still the old defaults)
+{
+  const sw = db.prepare("SELECT id FROM milestones WHERE name = 'Site walk & proposal'").get();
+  const OLD = ['Schedule the site walk with the owner', 'Photos of the parking area', 'Photos of the electrical room and panel', 'Note panel size and spare capacity', 'Measure distance from panel to charger spots', 'Write up site walk notes', 'Draft charger layout', 'Get electrical quote', 'Confirm rebate amount', 'Create and price the proposal'];
+  if (sw) {
+    const cur = db.prepare('SELECT label FROM milestone_steps WHERE milestone_id = ? ORDER BY position').all(sw.id).map((r) => r.label);
+    if (cur.join('|') === OLD.join('|')) {
+      db.transaction(() => {
+        db.prepare('DELETE FROM milestone_steps WHERE milestone_id = ?').run(sw.id);
+        DEFAULT_STEPS['Site walk & proposal'].forEach((l, i) => db.prepare('INSERT INTO milestone_steps (milestone_id, label, position) VALUES (?,?,?)').run(sw.id, l, i));
+      })();
+    }
+  }
+}
 if (db.prepare('SELECT COUNT(*) c FROM milestone_steps').get().c === 0) {
   const ins = db.prepare('INSERT INTO milestone_steps (milestone_id, label, position) VALUES (?,?,?)');
   db.transaction(() => db.prepare('SELECT id, name FROM milestones').all()
