@@ -477,3 +477,6 @@ details.overview > summary { cursor: pointer; font-weight: 700; font-size: 15px;
   .work-row { grid-template-columns: minmax(0, 1fr) auto; }
   .work-meta { grid-column: 1; justify-items: start; text-align: left; }
 }
+/* pipeline rows: click = dropdown, double-click = open the site */
+.prow-main { user-select: none; }
+.prow-detail[hidden] { display: none; }

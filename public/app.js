@@ -1155,14 +1155,14 @@ async function renderPipeline() {
     const line2 = [[p.city, p.state].filter(Boolean).join(', '), p.address ? p.name : '', p.code].filter(Boolean).join(' · ');
     const cls = isFlagged(p) ? 'is-stale' : ['on_hold', 'blocked'].includes(p.status) ? 'is-hold' : '';
     return `<div class="prow ${cls} ${open ? 'open' : ''}">
-      <button class="prow-main" type="button" data-row="${p.id}" aria-expanded="${open}">
+      <button class="prow-main" type="button" data-row="${p.id}" aria-expanded="${open}" title="Click to see milestones · double-click to open the site">
         <span class="prow-addr"><b>${esc(line1)}</b><span class="muted small">${esc(line2)}</span></span>
-        ${msStrip(p, { link: true })}
+        ${msStrip(p)}
         <span class="prow-prog">${progressBadge(p)}</span>
         <span class="prow-extra small">${p.status !== 'active' ? statusBadge(p.status) : ''}${p.estimated_value ? `<span class="muted">${money(p.estimated_value)}</span>` : ''}</span>
         <span class="caret muted">${open ? '▾' : '▸'}</span>
       </button>
-      ${open ? `<div class="prow-detail">
+      <div class="prow-detail" ${open ? '' : 'hidden'}>
         ${msList(p)}
         <div class="prow-facts small">
           <span>${p.customer_name ? esc(p.customer_name) : '<span class="muted">No customer</span>'}</span>
@@ -1174,7 +1174,7 @@ async function renderPipeline() {
           <button type="button" class="btn sm" data-sitechat="${p.id}">Site chat${p.msg_count ? ` (${p.msg_count})` : ''}</button>
           <a class="btn sm" href="#/projects/${p.id}">Open project →</a>
         </div>
-      </div>` : ''}
+      </div>
     </div>`;
   };
 
@@ -1206,7 +1206,7 @@ async function renderPipeline() {
       <button class="chip ${stateSel ? '' : 'active'}" data-state="">All states <span>${all.length}</span></button>
       ${keys.map((k) => `<button class="chip ${stateSel === k ? 'active' : ''}" data-state="${esc(k)}" title="${esc(stateName(k))}">${k === 'none' ? 'No state' : esc(k)} <span>${groups[k].length}</span></button>`).join('')}
     </div>
-    <p class="muted small">Milestones can be finished in any order. ✓ done · ● in progress · ○ not started · – not needed. Click a milestone to open it, or a row to see all of them. A red edge means a milestone is running past its target.</p>
+    <p class="muted small">Milestones can be finished in any order. ✓ done · ● in progress · ○ not started · – not needed. Click a row to see its milestones; double-click to open the site. A red edge means a milestone is running past its target.</p>
     ${shown.map(lane).join('') || `<div class="card empty">${stateSel ? 'No projects in this state.' : 'No projects match. Finish due diligence on a property to move it here.'}</div>`}`;
 
   const form = $('#pFilters');
@@ -1227,11 +1227,19 @@ async function renderPipeline() {
     const set = getCollapsed(); const k = b.dataset.toggle;
     set.has(k) ? set.delete(k) : set.add(k); setCollapsed(set); renderPipeline();
   }));
-  $$('[data-row]', view).forEach((b) => (b.onclick = () => {
-    const id = Number(b.dataset.row); openRows.has(id) ? openRows.delete(id) : openRows.add(id); renderPipeline();
-  }));
+  // one click shows or hides the row's dropdown (in place, so a double-click still registers); double-click opens the site
+  $$('[data-row]', view).forEach((b) => {
+    b.onclick = () => {
+      const id = Number(b.dataset.row); const row = b.closest('.prow'); const open = !openRows.has(id);
+      if (open) openRows.add(id); else openRows.delete(id);
+      row.classList.toggle('open', open);
+      $('.prow-detail', row).hidden = !open;
+      b.setAttribute('aria-expanded', String(open));
+      $('.caret', b).textContent = open ? '▾' : '▸';
+    };
+    b.ondblclick = () => { window.getSelection?.().removeAllRanges(); location.hash = `#/projects/${b.dataset.row}`; };
+  });
   const findP = (id) => all.find((x) => String(x.id) === String(id));
-  $$('[data-goto]', view).forEach((c) => (c.onclick = (e) => { e.stopPropagation(); location.hash = c.dataset.goto; }));
   $$('[data-sitechat]', view).forEach((b) => (b.onclick = () => openChat(findP(b.dataset.sitechat), null, () => renderPipeline())));
 }
 
