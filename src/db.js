@@ -387,6 +387,9 @@ addColumns('projects', {
 db.exec("UPDATE projects SET dd_stage = 'approved' WHERE phase = 'pipeline' AND dd_stage = 'new'");
 // who can approve or pass sites in the 10:30 review (admins always can)
 addColumns('users', { can_review: 'INTEGER NOT NULL DEFAULT 0' });
+// what each person is responsible for, so their dashboard shows their own work:
+// dd_assessor = rates new due diligence sites; milestone_ids = milestones they own (e.g. Proposal, Contract)
+addColumns('users', { dd_assessor: 'INTEGER NOT NULL DEFAULT 0', milestone_ids: 'TEXT' });
 
 // ---------- milestone steps ----------
 // Each milestone has a default checklist of steps (edited in Admin). A project gets its own copy

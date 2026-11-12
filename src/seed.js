@@ -27,6 +27,15 @@ const userIds = staff.map(([name, email, role, states]) => {
 const admin = db.prepare("SELECT id FROM users WHERE role = 'admin' ORDER BY id LIMIT 1").get()?.id || userIds[0];
 const jojo = db.prepare('SELECT id FROM users WHERE email = ?').get('jojo@eviumcharging.com')?.id
   ?? db.prepare("INSERT INTO users (name, email, password_hash, role, can_review) VALUES ('JoJo', 'jojo@eviumcharging.com', ?, 'staff', 1)").run(hashPassword('changeme123')).lastInsertRowid;
+// what each person is responsible for (shapes their dashboard), only where nothing is set yet
+{
+  const msId = (n) => milestones.find((m) => m.name === n)?.id;
+  const setDuty = db.prepare("UPDATE users SET dd_assessor = ?, milestone_ids = ? WHERE id = ? AND COALESCE(milestone_ids, '') = '' AND dd_assessor = 0");
+  // the admin login stands in for the due diligence / proposals & contracts person
+  setDuty.run(1, [msId('Proposal'), msId('Contract')].filter(Boolean).join(','), admin);
+  // state managers handle the field work in their territory
+  userIds.forEach((id) => setDuty.run(0, ['Site walk', 'Permitting', 'Approvals', 'Installation'].map(msId).filter(Boolean).join(','), id));
+}
 
 // ---------- utility directory (sample entries: add your own contacts) ----------
 const UTILITIES = [

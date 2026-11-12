@@ -347,11 +347,9 @@ const deadlineText = (d) => {
 const needsCheck = (r) => (r.verified ? '' : badge('rb-check', 'Sample · needs checking'));
 // small clickable chip for a rebate on a site
 const rebateChip = (r) => `<button type="button" class="rebate-chip" data-rebate="${r.id}" title="Show rebate details">💲 ${esc(r.name)}${r.status && r.status !== 'open' ? ` <span class="muted">(${esc(REBATE_STATUS[r.status] || r.status)})</span>` : ''}</button>`;
-const rebateCard = (r, extra = '') => `<button type="button" class="rebate-card" data-rebate="${r.id}" title="Show everything about this rebate">
-    <span class="rc-top"><b>${esc(r.name)}</b>${r.status ? rebateStatusBadge(r.status) : ''}</span>
-    ${r.amount_text ? `<span class="rc-amt">${esc(r.amount_text)}</span>` : ''}
-    <span class="rc-foot"><span>${[REBATE_KIND[r.kind], r.deadline ? deadlineText(r.deadline) : '', r.verified === 0 ? 'sample, needs checking' : ''].filter(Boolean).map(esc).join(' · ')}${extra ? ` · ${extra}` : ''}</span><span class="rc-more">View details ›</span></span>
-  </button>`;
+// a plain clickable line for a rebate on a site; opens the full rebate details
+const rebateLine = (r, extra = '') => `<button type="button" class="rebate-line" data-rebate="${r.id}" title="Show everything about this rebate">
+    <span class="rl-text"><span class="rl-name">${esc(r.name)}</span>${extra || r.amount_text ? `<span class="rl-sub">${esc(extra || r.amount_text)}</span>` : ''}</span><span class="rl-chev">›</span></button>`;
 const bindRebateChips = (root = view) => $$('[data-rebate]', root).forEach((b) => (b.onclick = (e) => { e.stopPropagation(); rebateInfo(b.dataset.rebate); }));
 
 async function renderRebates() {
@@ -810,14 +808,46 @@ async function renderMilestone(pid, mid) {
   mountChat($('#msChat'), p, m.id).catch(() => {});
 }
 
-// ---------- dashboard ----------
+// ---------- dashboard: your own work first, the company overview below ----------
+const myMilestoneIds = (u = S.me) => String(u?.milestone_ids || '').split(',').map(Number).filter(Boolean);
+const greeting = () => { const h = new Date().getHours(); return h < 12 ? 'Good morning' : h < 17 ? 'Good afternoon' : 'Good evening'; };
+const workSite = (p) => `<span class="work-site"><b>${esc(p.address || p.name)}</b><span class="muted small">${esc([[p.city, p.state].filter(Boolean).join(', '), p.address ? p.name : '', p.code].filter(Boolean).join(' · '))}</span></span>`;
+
 async function renderDashboard() {
   const d = await api('GET', '/api/dashboard');
-  const t = d.totals;
+  const t = d.totals; const mine = d.mine;
+  const hasDuties = !!(mine.dd || mine.review || mine.milestones.length);
   const total = Math.max(1, ...d.milestones.map((m) => m.done + m.in_progress + m.not_started));
-  view.innerHTML = `
-    <div class="page-head"><h1>Dashboard</h1><div class="actions"><button class="btn primary" id="newProject">+ New property</button></div></div>
-    <div class="kpis">
+
+  const ddCard = mine.dd ? `<section class="card work-card">
+      <div class="card-head"><h2>Due diligence to assess <span class="work-n">${mine.dd.length}</span></h2><a class="small" href="#/diligence?tab=new">Open Due Diligence ›</a></div>
+      ${mine.dd_waiting ? `<div class="muted small" style="margin:-4px 0 8px">${mine.dd_waiting} already waiting for the 10:30 review.</div>` : ''}
+      <div class="work-list">${mine.dd.map((p) => `<div class="work-row">
+          <a class="work-link" href="#/projects/${p.id}">${workSite(p)}</a>
+          <span class="work-meta">${p.dd_review_note ? `<span class="work-flag">Sent back: ${esc(p.dd_review_note)}</span>` : `${p.days_in_phase} day${p.days_in_phase === 1 ? '' : 's'} waiting`}</span>
+          <button class="btn sm ${p.dd_review_note ? '' : 'primary'}" data-assess="${p.id}">${p.dd_rating ? 'Finish' : 'Assess'}</button></div>`).join('')
+        || '<div class="work-empty">All caught up.</div>'}</div></section>` : '';
+
+  const reviewCard = mine.review ? `<section class="card work-card">
+      <div class="card-head"><h2>10:30 review <span class="work-n">${mine.review.length}</span></h2><a class="small" href="#/diligence?tab=review">Start the review ›</a></div>
+      <div class="work-list">${mine.review.map((p) => `<a class="work-row" href="#/diligence?tab=review">${workSite(p)}<span class="work-meta">${ratingView(p.dd_rating)}</span><span class="work-chev">›</span></a>`).join('')
+        || '<div class="work-empty">Nothing waiting for review.</div>'}</div></section>` : '';
+
+  const msCard = (g) => `<section class="card work-card">
+      <div class="card-head"><h2><span class="ms-dot" style="background:${esc(g.color)}"></span>${esc(g.name)} <span class="work-n">${g.in_progress.length + g.up_next.length}</span></h2>
+        <a class="small" href="#/pipeline?milestone_id=${g.id}&ms_status=todo">See in Pipeline ›</a></div>
+      <div class="work-sub">In progress <span class="muted">${g.in_progress.length}</span></div>
+      <div class="work-list">${g.in_progress.map((p) => `<a class="work-row ${p.ms.overdue ? 'late' : ''}" href="#/projects/${p.id}/m/${g.id}">${workSite(p)}
+          <span class="work-meta"><span class="ms-progress"><span style="width:${p.ms.steps_total ? Math.round((p.ms.steps_done / p.ms.steps_total) * 100) : 0}%"></span></span>
+            ${p.ms.steps_done} of ${p.ms.steps_total} steps · <span class="${p.ms.overdue ? 'stale' : ''}">${p.ms.days_open ?? 0} days${p.ms.overdue ? ' (late)' : ''}</span></span>
+          <span class="work-chev">›</span></a>`).join('') || '<div class="work-empty">None in progress.</div>'}</div>
+      <div class="work-sub">Up next <span class="muted">${g.up_next.length}</span></div>
+      <div class="work-list">${g.up_next.map((p) => `<a class="work-row" href="#/projects/${p.id}/m/${g.id}">${workSite(p)}
+          <span class="work-meta">${p.prev ? `${esc(p.prev.name)} ${p.prev.status === 'done' ? `done ${fdate(p.prev.completed_at)}` : 'not needed'}` : 'Ready to start'}${p.status !== 'active' ? ` · ${esc(label(p.status))}` : ''}</span>
+          <span class="work-chev">›</span></a>`).join('') || '<div class="work-empty">Nothing waiting to start.</div>'}</div>
+    </section>`;
+
+  const overview = `<div class="kpis">
       <a class="card kpi" href="#/diligence?tab=new"><div class="l">To assess</div><div class="v">${num(t.to_assess)} <span class="small muted">${num(t.to_review)} for 10:30 review</span></div></a>
       <a class="card kpi" href="#/pipeline"><div class="l">Projects in progress</div><div class="v">${num(t.open_projects)}</div></a>
       <div class="card kpi"><div class="l">Pipeline value</div><div class="v">${money(t.pipeline_value)}</div></div>
@@ -825,34 +855,38 @@ async function renderDashboard() {
       <div class="card kpi"><div class="l">Live</div><div class="v">${num(t.live_projects)} <span class="small muted">${num(t.live_chargers)} ports</span></div></div>
       <div class="card kpi"><div class="l">Open tickets</div><div class="v">${num(t.open_tickets)} ${t.overdue_tickets ? `<span class="small stale">${t.overdue_tickets} overdue</span>` : ''}</div></div>
     </div>
+    <div class="card"><h2>Milestones across open projects</h2>
+      <div class="funnel">${d.milestones.map((m) => {
+        const w = (n) => `${(n / total) * 100}%`;
+        return `<div class="funnel-row ms-funnel" data-mid="${m.id}" title="Projects still needing ${esc(m.name)}">
+          <div><span class="dot" style="background:${esc(m.color)}"></span> ${esc(m.name)}</div>
+          <div class="bar-track stack"><div class="seg-done" style="width:${w(m.done)}">${m.done || ''}</div><div class="seg-prog" style="width:${w(m.in_progress)}">${m.in_progress || ''}</div><div class="seg-todo" style="width:${w(m.not_started)}">${m.not_started || ''}</div></div>
+          <div class="small" style="text-align:right">${m.overdue ? `<span class="stale">${m.overdue} late</span>` : `<span class="muted">${m.not_needed ? `${m.not_needed} n/a` : ''}</span>`}</div></div>`;
+      }).join('')}</div>
+      <div class="legend small muted"><span><i class="seg-done"></i>Done</span><span><i class="seg-prog"></i>In progress</span><span><i class="seg-todo"></i>Not started</span></div>
+    </div>
+    <div class="card" style="margin-top:16px"><h2>Needs attention <span class="muted small">— running late, on hold or blocked</span></h2>
+      ${d.stalled.length ? `<div class="table-wrap" style="box-shadow:none"><table><thead><tr><th>Project</th><th>Milestones</th><th>Status</th><th>Owner</th></tr></thead><tbody>
+      ${d.stalled.map((p) => `<tr class="clickable" data-href="#/projects/${p.id}">
+        <td><b>${esc(p.address || p.name)}</b><div class="muted small">${esc(p.code)} · ${esc(p.name)}</div></td>
+        <td>${msStrip(p, { names: false })}<div class="small stale">${p.milestones.map((x, i) => (x.overdue ? `${esc(S.meta.milestones[i].name)} ${x.days_open}d` : '')).filter(Boolean).join(' · ')}</div></td>
+        <td>${statusBadge(p.status)}${p.hold_reason ? `<div class="muted small">${esc(p.hold_reason)}</div>` : ''}</td>
+        <td>${esc(p.owner_name || '—')}</td></tr>`).join('')}</tbody></table></div>` : '<div class="empty">Nothing stalled.</div>'}
+    </div>`;
+
+  let showOverview = !hasDuties;
+  try { const v = localStorage.getItem('evium.dash.overview'); if (v !== null && hasDuties) showOverview = v === '1'; } catch { /* storage unavailable */ }
+  view.innerHTML = `
+    <div class="page-head"><div><h1>${greeting()}, ${esc(S.me.name.split(' ')[0])}</h1>
+        <div class="muted small" style="margin-top:4px">${hasDuties ? `Your work${mine.scoped.length && mine.milestones.length ? ` · milestones in ${esc(mine.scoped.join(', '))}` : ''}` : 'Pick what you\'re responsible for to see your own work list here.'}</div></div>
+      <div class="actions"><button class="btn" id="customize">Customize</button><button class="btn primary" id="newProject">+ New property</button></div></div>
     <div class="cols-main">
       <div class="grid" style="gap:16px">
-        <div class="card"><h2>Milestones across open projects</h2>
-          <p class="muted small" style="margin-top:-6px">Projects work on several milestones at once. Click a milestone to see who still needs it.</p>
-          <div class="funnel">${d.milestones.map((m) => {
-            const w = (n) => `${(n / total) * 100}%`;
-            return `<div class="funnel-row ms-funnel" data-mid="${m.id}" title="Projects still needing ${esc(m.name)}">
-              <div><span class="dot" style="background:${esc(m.color)}"></span> ${esc(m.name)}</div>
-              <div class="bar-track stack">
-                <div class="seg-done" style="width:${w(m.done)}">${m.done || ''}</div>
-                <div class="seg-prog" style="width:${w(m.in_progress)}">${m.in_progress || ''}</div>
-                <div class="seg-todo" style="width:${w(m.not_started)}">${m.not_started || ''}</div>
-              </div>
-              <div class="small" style="text-align:right">${m.overdue ? `<span class="stale">${m.overdue} late</span>` : `<span class="muted">${m.not_needed ? `${m.not_needed} n/a` : ''}</span>`}</div>
-            </div>`;
-          }).join('')}</div>
-          <div class="legend small muted"><span><i class="seg-done"></i>Done</span><span><i class="seg-prog"></i>In progress</span><span><i class="seg-todo"></i>Not started</span></div>
-        </div>
-        <div class="card"><h2>Needs attention <span class="muted small">— a milestone running past its target, on hold or blocked</span></h2>
-          ${d.stalled.length ? `<div class="table-wrap" style="box-shadow:none"><table><thead><tr><th>Project</th><th>Milestones</th><th>Status</th><th>Owner</th></tr></thead><tbody>
-          ${d.stalled.map((p) => `<tr class="clickable" data-href="#/projects/${p.id}">
-            <td><b>${esc(p.address || p.name)}</b><div class="muted small">${esc(p.code)} · ${esc(p.name)}</div></td>
-            <td>${msStrip(p, { names: false })}
-              <div class="small stale">${p.milestones.map((x, i) => (x.overdue ? `${esc(S.meta.milestones[i].name)} ${x.days_open}d` : '')).filter(Boolean).join(' · ')}</div></td>
-            <td>${statusBadge(p.status)}${p.hold_reason ? `<div class="muted small">${esc(p.hold_reason)}</div>` : ''}</td>
-            <td>${esc(p.owner_name || '—')}</td></tr>`).join('')}
-          </tbody></table></div>` : '<div class="empty">Nothing stalled. 🎉</div>'}
-        </div>
+        ${hasDuties ? '' : `<div class="card work-setup"><h2>Make this dashboard yours</h2>
+          <p class="muted">Tell the CRM what you handle, like assessing due diligence sites, proposals and contracts, or site walks, and this page will list exactly what's waiting for you.</p>
+          <button class="btn primary" id="customize2">Choose what I'm responsible for</button></div>`}
+        ${ddCard}${reviewCard}${mine.milestones.map(msCard).join('')}
+        <details class="overview" ${showOverview ? 'open' : ''}><summary>Company overview</summary><div class="overview-body">${overview}</div></details>
       </div>
       <div class="grid" style="gap:16px">
         <div class="card" id="myReminders"></div>
@@ -866,17 +900,47 @@ async function renderDashboard() {
       </div>
     </div>`;
   $('#newProject').onclick = () => projectForm();
+  $('#customize').onclick = () => dutiesModal();
+  $('#customize2')?.addEventListener('click', () => dutiesModal());
+  $('details.overview').addEventListener('toggle', (e) => { try { localStorage.setItem('evium.dash.overview', e.target.open ? '1' : '0'); } catch { /* ignore */ } });
   $$('.ms-funnel', view).forEach((r) => (r.onclick = () => (location.hash = `#/pipeline?milestone_id=${r.dataset.mid}&ms_status=todo`)));
+  $$('[data-assess]', view).forEach((b) => (b.onclick = () => assessModal(mine.dd.find((p) => String(p.id) === b.dataset.assess), renderDashboard)));
   bindRowLinks();
   const drawRem = async () => {
     const el = $('#myReminders'); if (!el) return;
     const rows = await api('GET', '/api/reminders');
     const due = rows.filter((r) => r.due_on <= today());
-    el.innerHTML = `<h2>⏰ My reminders ${due.length ? `<span class="small stale">${due.length} due</span>` : ''}</h2>
-      <div class="rem-list">${rows.slice(0, 12).map((r) => reminderLine(r, { showSite: true })).join('') || '<div class="empty">No follow-ups. Set one with ⏰ on any milestone.</div>'}</div>`;
+    el.innerHTML = `<h2>My reminders ${due.length ? `<span class="small stale">${due.length} due</span>` : ''}</h2>
+      <div class="rem-list">${rows.slice(0, 12).map((r) => reminderLine(r, { showSite: true })).join('') || '<div class="empty">No follow-ups.</div>'}</div>`;
     bindReminderLines(el, drawRem);
   };
   drawRem().catch(() => {});
+}
+
+// the checkboxes that say what someone is responsible for (used on the dashboard and in Admin)
+const dutiesFields = (u) => `
+  <label class="check-inline"><input type="checkbox" name="dd_assessor" ${u?.dd_assessor ? 'checked' : ''}> Assesses new due diligence sites (1–5 rating and insight)</label>
+  <fieldset class="checkset"><legend>Milestones they own</legend>
+    ${S.meta.milestones.map((m) => `<label><input type="checkbox" name="ms_${m.id}" ${myMilestoneIds(u).includes(m.id) ? 'checked' : ''}> ${esc(m.name)}</label>`).join('')}</fieldset>`;
+const readDuties = (d) => {
+  const out = { dd_assessor: !!d.dd_assessor, milestone_ids: Object.keys(d).filter((k) => k.startsWith('ms_')).map((k) => Number(k.slice(3))) };
+  Object.keys(d).filter((k) => k.startsWith('ms_') || k === 'dd_assessor').forEach((k) => delete d[k]);
+  return out;
+};
+function dutiesModal() {
+  const card = openModal(`${modalHead('What are you responsible for?')}
+    <p class="muted small" style="margin-top:-6px">Your dashboard lists the work waiting for you in these areas.${myStates().length ? ` Milestone lists only show your territory (${esc(myStates().join(', '))}).` : ''}</p>
+    <form class="grid">${dutiesFields(S.me)}
+      ${canReview() ? '<div class="muted small">You also run the 10:30 review, so it shows on your dashboard.</div>' : ''}
+      <div class="modal-foot"><button type="button" class="btn" data-close>Cancel</button><button class="btn primary">Save</button></div></form>`);
+  $('form', card).addEventListener('submit', async (e) => {
+    e.preventDefault();
+    try {
+      const u = await api('PATCH', '/api/me/duties', readDuties(formData(e.target)));
+      Object.assign(S.me, { dd_assessor: u.dd_assessor, milestone_ids: u.milestone_ids });
+      await loadMeta(); modalClose = null; closeModal(); toast('Dashboard updated'); renderDashboard();
+    } catch (err) { fail(err); }
+  });
 }
 
 function activityItem(a) {
@@ -944,7 +1008,7 @@ async function renderDiligence() {
       </div>
       <div class="dd-insight">${esc(p.dd_insight || '')}</div>
       <div class="small dd-facts">${siteFacts(p)}</div>
-      ${p.rebates.length ? `<div class="rc-row">${p.rebates.map((r) => rebateCard(r)).join('')}</div>` : ''}
+      ${p.rebates.length ? `<div class="rl-row"><span class="muted small">Rebate</span>${p.rebates.map((r) => rebateLine(r)).join('')}</div>` : ''}
       <div class="dd-card2-foot">
         <span class="muted small">Assessed by ${esc(p.assessed_by_name || '—')} · ${fdate(p.dd_assessed_at)}${managersFor(p.state).length ? ` · ${esc(p.state)} manager: ${esc(managersFor(p.state).map((u) => u.name).join(', '))}` : ''}</span>
         <span class="dd-btns">${canReview()
@@ -1473,16 +1537,12 @@ async function renderProject(id) {
           <dt>Property owner</dt><dd>${esc(p.property_owner || '—')}</dd>
           <dt>Owner contact</dt><dd>${esc(p.property_owner_contact || '—')}</dd>
           <dt>Utility</dt><dd>${p.utility_id ? `<a href="#/utilities/${p.utility_id}">${esc(p.utility_company)}</a>` : esc(p.utility_company || '—')}</dd>
+          <dt>Rebate</dt><dd>${p.rebates.map((r, i) => rebateLine(r, i === 0 && p.rebate_amount ? `expected ${money(p.rebate_amount)}` : '')).join('')}${p.rebate_program ? `<div class="small">${esc(p.rebate_program)}</div>` : ''}${!p.rebates.length && !p.rebate_program ? '—' : ''}</dd>
+          <dt>Tax credit</dt><dd>${p.tax_credit_id ? rebateLine(S.meta.rebates.find((r) => r.id === p.tax_credit_id) || { id: p.tax_credit_id, name: 'Tax credit' },
+            `${{ yes: 'eligible', no: 'not eligible', unknown: 'eligibility not checked' }[p.tax_credit_eligible || 'unknown']}${p.tax_credit_amount ? `, est. ${money(p.tax_credit_amount)}` : ''}`) : '—'}</dd>
           ${p.dd_rating ? `<dt>Rating</dt><dd>${ratingView(p.dd_rating)}</dd>` : ''}
           ${p.diligence_completed_at ? `<dt>Approved</dt><dd>${fdate(p.diligence_completed_at)}${p.reviewed_by_name ? ` by ${esc(p.reviewed_by_name)}` : ''}</dd>` : ''}
         </dl>
-        <h3 class="side-h">Rebate</h3>
-        ${p.rebates.map((r, i) => rebateCard(r, i === 0 && p.rebate_amount ? `expected ${money(p.rebate_amount)}` : '')).join('')}
-        ${p.rebate_program ? `<div class="small" style="margin-top:6px">${p.rebates.length ? 'Also: ' : ''}${esc(p.rebate_program)}${!p.rebates.length && p.rebate_amount ? ` · expected ${money(p.rebate_amount)}` : ''}</div>` : ''}
-        ${!p.rebates.length && !p.rebate_program ? '<div class="muted small">None chosen yet. Click <b>Edit</b> to pick one from the Rebates board.</div>' : ''}
-        <h3 class="side-h">Tax credit</h3>
-        ${p.tax_credit_id ? rebateCard(S.meta.rebates.find((r) => r.id === p.tax_credit_id) || { id: p.tax_credit_id, name: 'Tax credit' },
-          `${{ yes: 'eligible', no: 'not eligible', unknown: 'eligibility not checked' }[p.tax_credit_eligible || 'unknown']}${p.tax_credit_amount ? `, est. ${money(p.tax_credit_amount)}` : ''}`) : '<div class="muted small">None.</div>'}
         ${p.diligence_notes ? `<h3 class="side-h">Notes</h3><div style="white-space:pre-wrap">${esc(p.diligence_notes)}</div>` : ''}</div>
         <div class="card" id="remCard"></div>
         <div class="card"><h2>Customer</h2><dl class="kv">
@@ -1746,7 +1806,8 @@ async function renderAdmin() {
       <div class="card"><div style="display:flex;justify-content:space-between;align-items:center"><h2>Staff users</h2><button class="btn primary sm" id="addUser">+ Add user</button></div>
         <p class="muted small">Only Evium staff sign in. Customers are stored as contacts on each project and never need an account.</p>
         <div class="table-wrap" style="box-shadow:none"><table><thead><tr><th>Name</th><th>Role</th><th>Territory</th><th>Status</th><th></th></tr></thead><tbody>
-        ${users.map((u) => `<tr><td><b>${esc(u.name)}</b><div class="muted small">${esc(u.email)}</div></td><td>${esc(label(u.role))}${u.role !== 'admin' && u.can_review ? '<div class="muted small">10:30 reviewer</div>' : ''}</td><td>${esc((u.states || '').replace(/,/g, ', ') || '—')}</td>
+        ${users.map((u) => `<tr><td><b>${esc(u.name)}</b><div class="muted small">${esc(u.email)}</div></td><td>${esc(label(u.role))}<div class="muted small">${esc([u.role !== 'admin' && u.can_review ? '10:30 reviewer' : '', u.dd_assessor ? 'Due diligence' : '',
+          ...myMilestoneIds(u).map((id) => S.meta.milestones.find((m) => m.id === id)?.name).filter(Boolean)].filter(Boolean).join(' · '))}</div></td><td>${esc((u.states || '').replace(/,/g, ', ') || '—')}</td>
           <td>${u.active ? badge('s-active', 'Active') : badge('s-cancelled', 'Disabled')}</td>
           <td style="text-align:right"><button class="btn sm" data-edituser="${u.id}">Edit</button></td></tr>`).join('')}
         </tbody></table></div></div>
@@ -1809,6 +1870,7 @@ function userForm(u = null) {
       ${u ? `<label>Status<select name="active">${options([['1', 'Active'], ['0', 'Disabled']], u.active ? '1' : '0')}</select></label>` : ''}
       <label class="full">${u ? 'Reset password (leave blank to keep)' : 'Temporary password (min 8)'}<input name="password" type="text" ${u ? '' : 'required'} minlength="8" autocomplete="off"></label>
       <label class="full check-inline"><input type="checkbox" name="can_review" ${u?.can_review ? 'checked' : ''}> Runs the 10:30 due diligence review (can approve or pass sites; admins always can)</label>
+      <div class="full grid" style="gap:8px">${dutiesFields(u)}</div>
       <fieldset class="checkset full"><legend>Territory: the states they manage. They see these first and are notified when a site there is approved for a site walk</legend>
         ${[...new Set([...CORE_STATES, ...S.meta.statesInUse, ...String(u?.states || '').split(',').filter(Boolean)])].map((st) => `<label><input type="checkbox" name="st_${st}" ${String(u?.states || '').split(',').includes(st) ? 'checked' : ''}> ${st}</label>`).join('')}</fieldset>
       <div class="modal-foot full"><button type="button" class="btn" data-close>Cancel</button><button class="btn primary">${u ? 'Save' : 'Create user'}</button></div>
@@ -1818,6 +1880,7 @@ function userForm(u = null) {
     const d = formData(e.target);
     d.states = Object.keys(d).filter((k) => k.startsWith('st_')).map((k) => k.slice(3));
     d.can_review = !!d.can_review;
+    Object.assign(d, readDuties(d));
     Object.keys(d).filter((k) => k.startsWith('st_')).forEach((k) => delete d[k]);
     if (u) { d.active = d.active === '1'; if (!d.password) delete d.password; }
     try {

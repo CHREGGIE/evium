@@ -65,7 +65,7 @@ function setSessionCookie(req, res, token, maxAgeSec) {
 function loadUser(req, _res, next) {
   const token = parseCookies(req)[COOKIE];
   if (token) {
-    const row = db.prepare(`SELECT u.id, u.name, u.email, u.role, u.states, u.can_review FROM sessions s JOIN users u ON u.id = s.user_id
+    const row = db.prepare(`SELECT u.id, u.name, u.email, u.role, u.states, u.can_review, u.dd_assessor, u.milestone_ids FROM sessions s JOIN users u ON u.id = s.user_id
       WHERE s.token = ? AND s.expires_at > datetime('now') AND u.active = 1`).get(token);
     if (row) { req.user = row; req.sessionToken = token; }
   }
@@ -117,6 +117,21 @@ app.use('/api', requireAuth);
 
 app.get('/api/me', (req, res) => res.json(req.user));
 
+// what a person is responsible for (shapes their dashboard)
+function setDuties(userId, body) {
+  if ('dd_assessor' in body) db.prepare('UPDATE users SET dd_assessor = ? WHERE id = ?').run(body.dd_assessor ? 1 : 0, userId);
+  if ('milestone_ids' in body) {
+    const valid = new Set(db.prepare('SELECT id FROM milestones').all().map((m) => m.id));
+    const ids = (Array.isArray(body.milestone_ids) ? body.milestone_ids : String(body.milestone_ids || '').split(','))
+      .map(Number).filter((id) => valid.has(id));
+    db.prepare('UPDATE users SET milestone_ids = ? WHERE id = ?').run([...new Set(ids)].join(',') || null, userId);
+  }
+}
+app.patch('/api/me/duties', wrap((req, res) => {
+  setDuties(req.user.id, req.body || {});
+  res.json(db.prepare('SELECT id, name, email, role, states, can_review, dd_assessor, milestone_ids FROM users WHERE id = ?').get(req.user.id));
+}));
+
 app.post('/api/me/password', wrap((req, res) => {
   const { current, next: pw } = req.body || {};
   const u = db.prepare('SELECT * FROM users WHERE id = ?').get(req.user.id);
@@ -132,7 +147,7 @@ const getMilestones = () => db.prepare('SELECT * FROM milestones ORDER BY positi
 app.get('/api/meta', (req, res) => {
   res.json({
     milestones: getMilestones(),
-    users: db.prepare('SELECT id, name, email, role, active, states, can_review FROM users ORDER BY name').all(),
+    users: db.prepare('SELECT id, name, email, role, active, states, can_review, dd_assessor, milestone_ids FROM users ORDER BY name').all(),
     utilities: db.prepare('SELECT id, name, states FROM utilities ORDER BY name').all(),
     rebates: db.prepare('SELECT id, name, state, kind, status, amount_text, provider FROM rebates ORDER BY state, name').all(),
     statesInUse: db.prepare("SELECT DISTINCT state FROM projects WHERE state IS NOT NULL AND state <> '' UNION SELECT DISTINCT state FROM rebates WHERE state <> 'US'").all().map((r) => r.state).sort(),
@@ -383,7 +398,37 @@ app.get('/api/dashboard', (req, res) => {
     LEFT JOIN users u ON u.id = a.user_id LEFT JOIN projects p ON p.id = a.project_id
     ORDER BY a.id DESC LIMIT 15`).all();
 
-  res.json({ milestones, totals, stalled, myTickets, recent });
+  // ---- your work ----
+  const me = db.prepare('SELECT * FROM users WHERE id = ?').get(req.user.id);
+  const myStates = String(me.states || '').split(',').filter(Boolean);
+  const inScope = (p) => !myStates.length || myStates.includes(p.state);  // a territory limits milestone work to those states
+  const mine = { scoped: myStates, dd: null, review: null, milestones: [] };
+  if (me.dd_assessor) {
+    mine.dd = attachMilestones(db.prepare(`${PROJECT_SELECT} WHERE p.phase = 'diligence' AND p.dd_stage = 'new' AND p.status IN ${OPEN}
+      ORDER BY (p.dd_review_note IS NULL), p.created_at`).all());
+    mine.dd_waiting = db.prepare(`SELECT COUNT(*) c FROM projects WHERE phase = 'diligence' AND dd_stage = 'review' AND status IN ${OPEN}`).get().c;
+  }
+  if (canReview(me)) {
+    mine.review = attachMilestones(db.prepare(`${PROJECT_SELECT} WHERE p.phase = 'diligence' AND p.dd_stage = 'review' AND p.status IN ${OPEN}
+      ORDER BY p.dd_rating DESC, p.dd_assessed_at`).all());
+  }
+  const owned = String(me.milestone_ids || '').split(',').map(Number).filter(Boolean);
+  const allMs = getMilestones();
+  allMs.forEach((m, i) => {
+    if (!owned.includes(m.id)) return;
+    const prev = allMs[i - 1];
+    const slim = (p, extra = {}) => ({ id: p.id, code: p.code, name: p.name, address: p.address, city: p.city, state: p.state, status: p.status, hold_reason: p.hold_reason, ms: p.milestones[i], ...extra });
+    const scoped = open.filter(inScope);
+    const inProgress = scoped.filter((p) => p.milestones[i].status === 'in_progress')
+      .sort((a, b) => b.milestones[i].overdue - a.milestones[i].overdue || (b.milestones[i].days_open || 0) - (a.milestones[i].days_open || 0)).map((p) => slim(p));
+    // up next: not started, and the milestone before it is finished (or there isn't one)
+    const upNext = scoped.filter((p) => p.milestones[i].status === 'not_started' && (!prev || ['done', 'not_needed'].includes(p.milestones[i - 1].status)))
+      .sort((a, b) => String(a.milestones[i - 1]?.completed_at || '').localeCompare(String(b.milestones[i - 1]?.completed_at || '')))
+      .map((p) => slim(p, { prev: prev ? { name: prev.name, status: p.milestones[i - 1].status, completed_at: p.milestones[i - 1].completed_at } : null }));
+    mine.milestones.push({ id: m.id, name: m.name, color: m.color, in_progress: inProgress, up_next: upNext });
+  });
+
+  res.json({ milestones, totals, stalled, myTickets, recent, mine });
 });
 
 // ---------- projects ----------
@@ -1117,7 +1162,7 @@ app.delete('/api/documents/:id', wrap((req, res) => {
 
 // ---------- admin: users ----------
 app.get('/api/users', requireAdmin, (req, res) => {
-  res.json(db.prepare('SELECT id, name, email, role, active, states, can_review, created_at FROM users ORDER BY name').all());
+  res.json(db.prepare('SELECT id, name, email, role, active, states, can_review, dd_assessor, milestone_ids, created_at FROM users ORDER BY name').all());
 });
 
 app.post('/api/users', requireAdmin, wrap((req, res) => {
@@ -1127,6 +1172,7 @@ app.post('/api/users', requireAdmin, wrap((req, res) => {
   if (db.prepare('SELECT 1 FROM users WHERE email = ?').get(email)) bad('A user with that email already exists');
   const info = db.prepare('INSERT INTO users (name, email, password_hash, role, states, can_review) VALUES (?,?,?,?,?,?)')
     .run(String(name), String(email).trim(), hashPassword(String(password)), role === 'admin' ? 'admin' : 'staff', normStates(states), req.body?.can_review ? 1 : 0);
+  setDuties(info.lastInsertRowid, req.body || {});
   res.status(201).json({ id: info.lastInsertRowid });
 }));
 
@@ -1145,6 +1191,7 @@ app.patch('/api/users/:id', requireAdmin, wrap((req, res) => {
   if (active === false || active === 0) db.prepare('DELETE FROM sessions WHERE user_id = ?').run(u.id);
   if ('states' in (req.body || {})) db.prepare('UPDATE users SET states = ? WHERE id = ?').run(normStates(req.body.states), u.id);
   if ('can_review' in (req.body || {})) db.prepare('UPDATE users SET can_review = ? WHERE id = ?').run(req.body.can_review ? 1 : 0, u.id);
+  setDuties(u.id, req.body || {});
   res.json({ ok: true });
 }));
 
