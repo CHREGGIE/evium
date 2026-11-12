@@ -58,9 +58,10 @@ const OPEN_STATUSES = ['active', 'on_hold', 'blocked'];
 const msWhen = (x) => (x.status === 'done' && x.completed_at ? `done ${fdate(x.completed_at)}`
   : x.status === 'in_progress' ? `${x.days_open ?? 0}d in progress${x.overdue ? ` · over ${x.sla_days}d target` : ''}` : '');
 // small row of chips: one per milestone, showing its status
-const msStrip = (p, { names = true } = {}) => `<span class="ms-strip">${S.meta.milestones.map((m, i) => {
+const msStrip = (p, { names = true, chat = false } = {}) => `<span class="ms-strip">${S.meta.milestones.map((m, i) => {
   const x = p.milestones?.[i] || { status: 'not_started' };
-  return `<span class="ms ms-${x.status}${x.overdue ? ' ms-overdue' : ''}" title="${esc(m.name)}: ${MS_LABEL[x.status]}${msWhen(x) ? ` (${esc(msWhen(x))})` : ''}">${MS_ICON[x.status]}${names ? ` ${esc(m.name)}` : ''}</span>`;
+  const title = `${esc(m.name)}: ${MS_LABEL[x.status]}${msWhen(x) ? ` (${esc(msWhen(x))})` : ''}${chat ? ` · click to open its chat${x.msg_count ? ` (${x.msg_count} messages)` : ''}` : ''}`;
+  return `<span class="ms ms-${x.status}${x.overdue ? ' ms-overdue' : ''}${chat ? ' ms-click' : ''}" title="${title}"${chat ? ` data-chat="${m.id}" data-pid="${p.id}"` : ''}>${MS_ICON[x.status]}${names ? ` ${esc(m.name)}` : ''}${chat && x.msg_count ? `<sup>${x.msg_count}</sup>` : ''}</span>`;
 }).join('')}</span>`;
 const progressBadge = (p) => (p.phase === 'diligence' ? phaseBadge() : p.ms_complete ? badge('ms-live', '✓ Live') : badge('', `${p.ms_done}/${p.ms_total} done`));
 const isFlagged = (p) => p.ms_overdue > 0 && OPEN_STATUSES.includes(p.status);
@@ -68,11 +69,17 @@ const isFlagged = (p) => p.ms_overdue > 0 && OPEN_STATUSES.includes(p.status);
 const msEditor = (p) => `<div class="ms-editor">${S.meta.milestones.map((m, i) => {
   const x = p.milestones[i];
   return `<div class="ms-row ${x.overdue ? 'ms-overdue' : ''}">
-    <div class="ms-name"><span class="dot" style="background:${esc(m.color)}"></span><b>${esc(m.name)}</b><span class="small ${x.overdue ? 'stale' : 'muted'}">${esc(msWhen(x))}</span></div>
+    <div class="ms-name"><button type="button" class="ms-chat" data-chat="${m.id}" data-pid="${p.id}" title="Open the ${esc(m.name)} chat"><span class="dot" style="background:${esc(m.color)}"></span><b>${esc(m.name)}</b><span class="ms-chat-n">💬${x.msg_count ? ` ${x.msg_count}` : ''}</span></button><span class="small ${x.overdue ? 'stale' : 'muted'}">${esc(msWhen(x))}</span></div>
     <div class="seg" role="group" aria-label="${esc(m.name)}">${MS_STATUSES.map((s) => `<button type="button" class="${x.status === s ? `on is-${s}` : ''}" data-ms="${m.id}" data-pid="${p.id}" data-st="${s}" aria-pressed="${x.status === s}">${MS_LABEL[s]}</button>`).join('')}</div>
   </div>`;
 }).join('')}</div>`;
-function bindMsEditor(root, after) {
+function bindMsEditor(root, after, findProject) {
+  // clicking a milestone (its name, or its chip in a pipeline row) opens its chat
+  $$('[data-chat]', root).forEach((b) => (b.onclick = (e) => {
+    e.stopPropagation();
+    const proj = findProject(b.dataset.pid);
+    if (proj) openChat(proj, Number(b.dataset.chat), () => after(proj));
+  }));
   $$('[data-ms]', root).forEach((b) => (b.onclick = async (e) => {
     e.stopPropagation();
     if (b.classList.contains('on')) return;
@@ -254,7 +261,7 @@ async function renderDashboard() {
 }
 
 function activityItem(a) {
-  const icons = { milestone_updated: '🏁', moved_to_pipeline: '✅', project_created: '🆕', stage_changed: '➡️', status_changed: '🚦', project_updated: '✏️', ticket_created: '🎫', ticket_updated: '🎫', ticket_deleted: '🗑️', documents_uploaded: '📎', document_deleted: '🗑️', note: '📝' };
+  const icons = { message: '💬', milestone_updated: '🏁', moved_to_pipeline: '✅', project_created: '🆕', stage_changed: '➡️', status_changed: '🚦', project_updated: '✏️', ticket_created: '🎫', ticket_updated: '🎫', ticket_deleted: '🗑️', documents_uploaded: '📎', document_deleted: '🗑️', note: '📝' };
   const proj = a.project_name ? ` <a href="#/projects/${a.project_id}">${esc(a.code)}</a>` : '';
   const body = a.action === 'note' ? `<div class="note">${esc(a.detail)}</div>` : `<span>${esc(a.detail || '')}</span>`;
   return `<div class="feed-item">${icons[a.action] || '•'} <b>${esc(a.user_name || 'System')}</b> <span class="muted">${esc(label(a.action))}</span>${proj}
@@ -374,7 +381,7 @@ async function renderPipeline() {
     return `<div class="prow ${cls} ${open ? 'open' : ''}">
       <button class="prow-main" type="button" data-row="${p.id}" aria-expanded="${open}">
         <span class="prow-addr"><b>${esc(line1)}</b><span class="muted small">${esc(line2)}</span></span>
-        ${msStrip(p)}
+        ${msStrip(p, { chat: true })}
         <span class="prow-prog">${progressBadge(p)}</span>
         <span class="prow-extra small">${p.status !== 'active' ? statusBadge(p.status) : ''}${p.estimated_value ? `<span class="muted">${money(p.estimated_value)}</span>` : ''}</span>
         <span class="caret muted">${open ? '▾' : '▸'}</span>
@@ -387,6 +394,7 @@ async function renderPipeline() {
           ${p.owner_name ? `<span>👤 ${esc(p.owner_name)}</span>` : ''}
           ${p.open_tickets ? `<span>🎫 ${p.open_tickets} open</span>` : ''}
           ${p.hold_reason && p.status !== 'active' ? `<span style="color:var(--warn)">${esc(p.hold_reason)}</span>` : ''}
+          <button type="button" class="btn sm" data-sitechat="${p.id}">💬 Site chat${p.msg_count ? ` (${p.msg_count})` : ''}</button>
           <a class="btn sm" href="#/projects/${p.id}">Open project →</a>
         </div>
       </div>` : ''}
@@ -442,7 +450,9 @@ async function renderPipeline() {
   $$('[data-row]', view).forEach((b) => (b.onclick = () => {
     const id = Number(b.dataset.row); openRows.has(id) ? openRows.delete(id) : openRows.add(id); renderPipeline();
   }));
-  bindMsEditor(view, () => renderPipeline());
+  const findP = (id) => all.find((x) => String(x.id) === String(id));
+  bindMsEditor(view, () => renderPipeline(), findP);
+  $$('[data-sitechat]', view).forEach((b) => (b.onclick = () => openChat(findP(b.dataset.sitechat), null, () => renderPipeline())));
 }
 
 // ---------- projects list ----------
@@ -538,8 +548,98 @@ function projectForm(p = null, { phase = 'diligence' } = {}) {
   });
 }
 
+// ---------- site chat ----------
+// One main chat per site. Each milestone has its own chat too; those messages are tagged with
+// the milestone and also appear in the main chat, so every conversation is tracked in one place.
+const msById = (id) => S.meta.milestones.find((m) => String(m.id) === String(id));
+const initials = (n) => String(n || '?').split(/\s+/).map((w) => w[0]).slice(0, 2).join('').toUpperCase();
+const msTag = (x, clickable) => (x.milestone
+  ? `<${clickable && x.milestone_id ? `button type="button" data-open-ms="${x.milestone_id}"` : 'span'} class="msg-tag" title="${clickable ? `Open the ${esc(x.milestone)} chat` : ''}"><span class="dot" style="background:${esc(x.color || '#94a3b8')}"></span>${esc(x.milestone)}</${clickable && x.milestone_id ? 'button' : 'span'}>`
+  : '');
+
+function chatItem(x, inMain) {
+  if (x.kind === 'event') {
+    return `<div class="msg-event">${msTag(x, inMain)} <span>marked <b>${esc(MS_LABEL[x.to_status] || x.to_status)}</b> by ${esc(x.user_name || '—')}</span>
+      <span class="muted">· ${fdatetime(x.created_at)}</span>${x.note ? `<div class="muted">“${esc(x.note)}”</div>` : ''}</div>`;
+  }
+  const mine = x.user_id === S.me.id;
+  return `<div class="msg ${mine ? 'mine' : ''}">
+    <div class="avatar" title="${esc(x.user_name || '')}">${esc(initials(x.user_name))}</div>
+    <div class="msg-main">
+      <div class="msg-head"><b>${esc(x.user_name || 'Former user')}</b>${inMain ? msTag(x, true) : ''}<span class="muted small">${fdatetime(x.created_at)}</span>
+        ${mine || S.me.role === 'admin' ? `<button type="button" class="msg-del" data-del="${x.id}" title="Delete message" aria-label="Delete message">✕</button>` : ''}</div>
+      <div class="msg-body">${esc(x.body)}</div>
+    </div></div>`;
+}
+
+// Renders a chat into `el`. milestoneId = null for the site's main chat.
+async function mountChat(el, p, milestoneId, { onOpenMilestone, onChange } = {}) {
+  const m = milestoneId ? msById(milestoneId) : null;
+  const canTag = !m && p.phase === 'pipeline';
+  el.innerHTML = `<div class="chat">
+    <div class="chat-log" aria-live="polite"><div class="empty">Loading…</div></div>
+    <form class="chat-form">
+      ${canTag ? `<select name="milestone_id" aria-label="About">${options(S.meta.milestones.map((x) => [x.id, x.name]), '', { blank: 'General' })}</select>` : ''}
+      <textarea name="body" rows="2" required placeholder="${m ? `Message about ${esc(m.name)}… (also shows in the site chat)` : 'Message the team about this site…'}  Enter to send, Shift+Enter for a new line"></textarea>
+      <button class="btn primary">Send</button>
+    </form></div>`;
+  const log = $('.chat-log', el); const form = $('.chat-form', el);
+  let sig = null;
+  const load = async (force) => {
+    if (!el.isConnected) return;
+    const rows = await api('GET', `/api/projects/${p.id}/messages${m ? `?milestone_id=${m.id}` : ''}`);
+    const s = rows.map((r) => `${r.kind}${r.id}`).join(',');
+    if (s === sig && !force) return;
+    const first = sig === null; sig = s;
+    const nearBottom = log.scrollHeight - log.scrollTop - log.clientHeight < 60;
+    log.innerHTML = rows.map((x) => chatItem(x, !m)).join('')
+      || `<div class="empty">No messages yet. ${m ? `Start the ${esc(m.name)} conversation.` : 'Start the conversation for this site.'}</div>`;
+    if (first || nearBottom || force) log.scrollTop = log.scrollHeight;
+    $$('[data-open-ms]', log).forEach((b) => (b.onclick = () => onOpenMilestone?.(Number(b.dataset.openMs))));
+    $$('[data-del]', log).forEach((b) => (b.onclick = async () => {
+      if (!confirm('Delete this message?')) return;
+      try { await api('DELETE', `/api/messages/${b.dataset.del}`); await load(true); onChange?.(); } catch (err) { fail(err); }
+    }));
+  };
+  await load();
+  // pick up teammates' messages; stops by itself once the chat is closed
+  const timer = setInterval(() => { if (!el.isConnected) clearInterval(timer); else load().catch(() => {}); }, 10000);
+  const ta = $('textarea', form);
+  ta.addEventListener('keydown', (e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); form.requestSubmit(); } });
+  form.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const d = formData(form); if (!d.body) return;
+    const btn = $('button', form); btn.disabled = true;
+    try {
+      await api('POST', `/api/projects/${p.id}/messages`, { body: d.body, milestone_id: m ? m.id : d.milestone_id || null });
+      ta.value = ''; await load(true); onChange?.();
+    } catch (err) { fail(err); } finally { btn.disabled = false; ta.focus(); }
+  });
+}
+
+// Pop-up chat for one milestone (or the whole site when milestoneId is null)
+function openChat(p, milestoneId, after) {
+  const m = milestoneId ? msById(milestoneId) : null;
+  const x = m ? p.milestones?.find((y) => y.id === m.id) : null;
+  const card = openModal(`<div class="modal-head"><div>
+      <h2 style="margin:0">${m ? `<span class="dot" style="background:${esc(m.color)}"></span> ${esc(m.name)} chat` : '💬 Site chat'}</h2>
+      <div class="muted small">${esc(p.address || p.name)} · ${esc(p.code)}${x ? ` · ${MS_ICON[x.status]} ${esc(MS_LABEL[x.status])}${msWhen(x) ? ` (${esc(msWhen(x))})` : ''}` : ''}</div></div>
+      <button class="x" data-close aria-label="Close">×</button></div>
+    <div id="chatMount"></div>
+    <div class="muted small" style="margin-top:8px">${m ? 'Messages here also appear in the site chat. ' : ''}<a href="#/projects/${p.id}" id="toProject">Open the project page →</a></div>`,
+  { wide: true, onClose: after });
+  $('#toProject', card).onclick = () => { projectTab = 'chat'; };
+  mountChat($('#chatMount', card), p, milestoneId, { onOpenMilestone: (mid) => { modalClose = null; closeModal(); openChat(p, mid, after); } });
+}
+
+async function tabChat(p) {
+  await mountChat($('#tabBody'), p, null, {
+    onOpenMilestone: (mid) => openChat(p, mid, () => renderProject(p.id)),
+  });
+}
+
 // ---------- project detail ----------
-let projectTab = 'tickets';
+let projectTab = 'chat';
 async function renderProject(id) {
   const p = await api('GET', `/api/projects/${id}`);
   const dd = p.phase === 'diligence';
@@ -568,7 +668,7 @@ async function renderProject(id) {
     : `<div class="card"><h2 style="margin-bottom:4px">Milestones <span class="muted small">— ${p.ms_complete ? 'all done, this site is live 🎉' : `${p.ms_done} of ${p.ms_total} done · finish them in any order`}</span></h2>${msEditor(p)}</div>`}
     <div class="cols-main" style="margin-top:16px">
       <div>
-        <div class="tabs" style="margin-top:0">${['tickets', 'documents', 'timeline', 'activity'].map((t) => `<button class="tab ${projectTab === t ? 'active' : ''}" data-tab="${t}">${label(t)}${t === 'tickets' && p.open_tickets ? ` (${p.open_tickets})` : ''}${t === 'documents' && p.doc_count ? ` (${p.doc_count})` : ''}</button>`).join('')}</div>
+        <div class="tabs" style="margin-top:0">${['chat', 'tickets', 'documents', 'timeline', 'activity'].map((t) => `<button class="tab ${projectTab === t ? 'active' : ''}" data-tab="${t}">${t === 'chat' ? '💬 Chat' : label(t)}${t === 'chat' && p.msg_count ? ` (${p.msg_count})` : ''}${t === 'tickets' && p.open_tickets ? ` (${p.open_tickets})` : ''}${t === 'documents' && p.doc_count ? ` (${p.doc_count})` : ''}</button>`).join('')}</div>
         <div id="tabBody"></div>
       </div>
       <div class="grid" style="gap:16px">
@@ -601,7 +701,7 @@ async function renderProject(id) {
 
   $('#editProject').onclick = () => projectForm(p);
   $('#promote')?.addEventListener('click', () => promoteModal(p, route));
-  bindMsEditor(view, () => route());
+  bindMsEditor(view, () => route(), () => p);
   $('#quickStatus').onchange = async (e) => {
     const status = e.target.value; let hold_reason;
     if (['on_hold', 'blocked', 'lost', 'cancelled'].includes(status)) {
@@ -617,7 +717,7 @@ async function renderProject(id) {
   const showTab = (t) => {
     projectTab = t;
     $$('.tab', view).forEach((b) => b.classList.toggle('active', b.dataset.tab === t));
-    ({ tickets: tabTickets, documents: tabDocuments, timeline: tabTimeline, activity: tabActivity })[t](p);
+    ({ chat: tabChat, tickets: tabTickets, documents: tabDocuments, timeline: tabTimeline, activity: tabActivity })[t](p);
   };
   $$('.tab', view).forEach((b) => (b.onclick = () => showTab(b.dataset.tab)));
   showTab(projectTab);

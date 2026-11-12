@@ -145,20 +145,25 @@ function attachMilestones(list) {
   if (!list.length) return list;
   const ms = getMilestones();
   const ids = list.map((p) => p.id);
-  const by = {};
+  const by = {}; const msgs = {};
   for (let i = 0; i < ids.length; i += 500) {
-    const chunk = ids.slice(i, i + 500);
-    db.prepare(`SELECT * FROM project_milestones WHERE project_id IN (${chunk.map(() => '?').join(',')})`).all(...chunk)
+    const chunk = ids.slice(i, i + 500); const qs = chunk.map(() => '?').join(',');
+    db.prepare(`SELECT * FROM project_milestones WHERE project_id IN (${qs})`).all(...chunk)
       .forEach((r) => ((by[r.project_id] ||= {})[r.milestone_id] = r));
+    // chat message counts: per milestone, and the total for the site's main chat
+    db.prepare(`SELECT project_id, milestone_id, COUNT(*) c FROM messages WHERE project_id IN (${qs}) GROUP BY project_id, milestone_id`).all(...chunk)
+      .forEach((r) => ((msgs[r.project_id] ||= {})[r.milestone_id ?? 0] = r.c));
   }
   const t = Date.now();
   for (const p of list) {
     const mine = by[p.id] || {};
+    const counts = msgs[p.id] || {};
+    p.msg_count = Object.values(counts).reduce((a, n) => a + n, 0);
     p.milestones = ms.map((m) => {
       const r = mine[m.id];
       const status = r?.status || 'not_started';
       const days = status === 'in_progress' && r.started_at ? Math.max(0, Math.floor((t - parseTs(r.started_at)) / 864e5)) : null;
-      return { id: m.id, status, started_at: r?.started_at || null, completed_at: r?.completed_at || null, days_open: days, sla_days: m.sla_days, overdue: days != null && days > m.sla_days };
+      return { id: m.id, status, started_at: r?.started_at || null, completed_at: r?.completed_at || null, days_open: days, sla_days: m.sla_days, overdue: days != null && days > m.sla_days, msg_count: counts[m.id] || 0 };
     });
     const needed = p.milestones.filter((x) => x.status !== 'not_needed');
     p.ms_done = needed.filter((x) => x.status === 'done').length;
@@ -414,6 +419,50 @@ app.post('/api/projects/:id/notes', wrap((req, res) => {
   logActivity(p.id, req.user.id, 'note', body.slice(0, 5000));
   db.prepare('UPDATE projects SET updated_at = ? WHERE id = ?').run(now(), p.id);
   res.status(201).json({ ok: true });
+}));
+
+// ---------- site chat ----------
+// One main chat per site. A milestone chat is the same conversation filtered to that milestone,
+// so everything written in a milestone chat also appears in the main chat.
+app.get('/api/projects/:id/messages', (req, res) => {
+  const p = db.prepare('SELECT id FROM projects WHERE id = ?').get(req.params.id);
+  if (!p) return res.status(404).json({ error: 'Project not found' });
+  const mid = req.query.milestone_id ? Number(req.query.milestone_id) : null;
+  const msgs = db.prepare(`SELECT m.id, m.milestone_id, COALESCE(ms.name, m.milestone_name) AS milestone, ms.color, m.user_id, u.name AS user_name,
+      m.body, m.created_at, 'message' AS kind
+    FROM messages m LEFT JOIN milestones ms ON ms.id = m.milestone_id LEFT JOIN users u ON u.id = m.user_id
+    WHERE m.project_id = ? ${mid ? 'AND m.milestone_id = ?' : ''}`).all(...(mid ? [p.id, mid] : [p.id]));
+  // milestone status changes show inline as small system lines
+  const events = db.prepare(`SELECT h.id, h.milestone_id, COALESCE(ms.name, h.milestone_name) AS milestone, ms.color, h.user_id, u.name AS user_name,
+      h.from_status, h.to_status, h.note, h.changed_at AS created_at, 'event' AS kind
+    FROM milestone_history h LEFT JOIN milestones ms ON ms.id = h.milestone_id LEFT JOIN users u ON u.id = h.user_id
+    WHERE h.project_id = ? ${mid ? 'AND h.milestone_id = ?' : ''}`).all(...(mid ? [p.id, mid] : [p.id]));
+  const all = [...msgs, ...events].sort((a, b) => a.created_at.localeCompare(b.created_at) || (a.kind === b.kind ? a.id - b.id : a.kind === 'event' ? -1 : 1));
+  res.json(all.slice(-500));
+});
+
+app.post('/api/projects/:id/messages', wrap((req, res) => {
+  const p = db.prepare('SELECT id FROM projects WHERE id = ?').get(req.params.id) || notFound('Project not found');
+  const body = String(req.body?.body || '').trim();
+  if (!body) bad('Message cannot be empty');
+  let m = null;
+  if (req.body?.milestone_id) m = db.prepare('SELECT * FROM milestones WHERE id = ?').get(Number(req.body.milestone_id)) || bad('Unknown milestone');
+  const t = now();
+  db.transaction(() => {
+    db.prepare('INSERT INTO messages (project_id, milestone_id, milestone_name, user_id, body, created_at) VALUES (?,?,?,?,?,?)')
+      .run(p.id, m?.id ?? null, m?.name ?? null, req.user.id, body.slice(0, 5000), t);
+    db.prepare('UPDATE projects SET updated_at = ? WHERE id = ?').run(t, p.id);
+    logActivity(p.id, req.user.id, 'message', `${m ? `[${m.name}] ` : ''}${body.slice(0, 300)}`);
+  })();
+  res.status(201).json({ ok: true });
+}));
+
+// authors can delete their own messages; admins can delete any
+app.delete('/api/messages/:id', wrap((req, res) => {
+  const msg = db.prepare('SELECT * FROM messages WHERE id = ?').get(req.params.id) || notFound('Message not found');
+  if (msg.user_id !== req.user.id && req.user.role !== 'admin') throw new HttpError(403, 'You can only delete your own messages');
+  db.prepare('DELETE FROM messages WHERE id = ?').run(msg.id);
+  res.json({ ok: true });
 }));
 
 // ---------- tickets ----------

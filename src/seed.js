@@ -107,6 +107,22 @@ if (seedPipeline) db.transaction(() => {
     insT.run(pi, title, type, prio, status, userIds[ui], due, userIds[0], null);
     insA.run(pi, userIds[0], 'ticket_created', title);
   });
+
+  // a few chat messages: [project, milestone position (0 = general site chat), staff index, text, days ago]
+  const insMsg = db.prepare(`INSERT INTO messages (project_id, milestone_id, milestone_name, user_id, body, created_at)
+    VALUES (?,?,?,?,?, datetime('now', ?))`);
+  [
+    [1, 0, 0, 'Kicked this one off with Dana. She wants chargers live before the holiday rush.', '-60 days'],
+    [1, 4, 0, 'Permit submitted to the City of Austin. Their portal says 4–6 weeks.', '-40 days'],
+    [1, 5, 1, 'Landlord approval came back early, so approvals are done even though the permit is still out.', '-30 days'],
+    [1, 4, 2, 'Plan review came back with comments on the load calc. Working on a response.', '-3 days'],
+    [1, 4, 0, 'Sent the revised load calc this morning.', '-1 days'],
+    [2, 5, 1, 'CenterPoint still has no date for the transformer upgrade. Escalated to our utility rep.', '-10 days'],
+    [2, 0, 2, 'Customer is asking if we can start trenching while we wait on the utility.', '-2 days'],
+  ].forEach(([pi, pos, ui, body, ago]) => {
+    const m = pos ? milestones[pos - 1] : null;
+    insMsg.run(pi, m?.id ?? null, m?.name ?? null, userIds[ui], body, ago);
+  });
 })();
 
 const insD = db.prepare(`INSERT INTO projects (name, address, city, state, zip, site_type, property_owner, property_owner_contact, rebate_program,

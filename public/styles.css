@@ -225,3 +225,36 @@ a.card.kpi:hover { text-decoration: none; border-color: #c4b5fd; }
 .legend { display: flex; gap: 14px; margin-top: 10px; }
 .legend i { display: inline-block; width: 10px; height: 10px; border-radius: 3px; margin-right: 5px; vertical-align: -1px; }
 .prow-prog { white-space: nowrap; }
+
+/* site chat */
+.chat { display: grid; gap: 10px; }
+.chat-log { background: #fff; border: 1px solid var(--line); border-radius: var(--radius); padding: 12px; max-height: 60vh; min-height: 220px; overflow-y: auto; display: grid; gap: 10px; align-content: start; }
+.modal-card .chat-log { max-height: 55vh; }
+.msg { display: grid; grid-template-columns: 30px 1fr; gap: 8px; align-items: start; }
+.avatar { width: 30px; height: 30px; border-radius: 50%; background: #e2e8f0; color: #334155; display: grid; place-items: center; font-size: 11px; font-weight: 700; }
+.msg.mine .avatar { background: var(--brand); color: #fff; }
+.msg-main { min-width: 0; }
+.msg-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; font-size: 13px; }
+.msg-body { white-space: pre-wrap; word-break: break-word; background: #f1f5f9; border-radius: 0 10px 10px 10px; padding: 7px 10px; margin-top: 3px; display: inline-block; max-width: 100%; }
+.msg.mine .msg-body { background: #ecfdf5; }
+.msg-del { background: none; border: 0; color: #cbd5e1; cursor: pointer; font-size: 12px; padding: 0 2px; margin-left: auto; }
+.msg-del:hover { color: var(--danger); }
+.msg-tag { display: inline-flex; align-items: center; gap: 4px; font: inherit; font-size: 11px; font-weight: 600; background: #f8fafc; border: 1px solid var(--line); border-radius: 999px; padding: 1px 8px; color: #334155; }
+button.msg-tag { cursor: pointer; }
+button.msg-tag:hover { border-color: #94a3b8; }
+.msg-event { font-size: 12px; color: #475569; display: flex; gap: 6px; align-items: center; flex-wrap: wrap; justify-content: center; text-align: center; padding: 2px 0; }
+.msg-event > div { flex-basis: 100%; }
+.chat-form { display: grid; grid-template-columns: auto 1fr auto; gap: 8px; align-items: end; }
+.chat-form select { width: auto; max-width: 170px; }
+.chat-form textarea { min-height: 42px; }
+.chat-form:not(:has(select)) { grid-template-columns: 1fr auto; }
+.ms-chat { display: inline-flex; align-items: center; gap: 6px; background: none; border: 0; padding: 2px 4px; margin-left: -4px; border-radius: 6px; font: inherit; color: inherit; cursor: pointer; }
+.ms-chat:hover { background: #f1f5f9; }
+.ms-chat-n { font-size: 11px; color: var(--muted); }
+.ms-click { cursor: pointer; }
+.ms-click:hover { filter: brightness(.95); box-shadow: 0 0 0 1px #94a3b8; }
+.ms sup { font-size: 9px; margin-left: 1px; }
+@media (max-width: 900px) {
+  .chat-form { grid-template-columns: 1fr auto; }
+  .chat-form select { grid-column: 1 / -1; max-width: none; width: 100%; }
+}

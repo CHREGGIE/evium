@@ -213,6 +213,19 @@ CREATE TABLE IF NOT EXISTS milestone_history (
   changed_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 CREATE INDEX IF NOT EXISTS idx_mhist_project ON milestone_history(project_id, changed_at);
+
+-- Site chat. A message with a milestone_id belongs to that milestone's chat;
+-- every message (with or without one) also shows in the site's main chat.
+CREATE TABLE IF NOT EXISTS messages (
+  id INTEGER PRIMARY KEY,
+  project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  milestone_id INTEGER REFERENCES milestones(id) ON DELETE SET NULL,
+  milestone_name TEXT,
+  user_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  body TEXT NOT NULL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_messages_project ON messages(project_id, created_at);
 `);
 
 const DEFAULT_MILESTONES = [
