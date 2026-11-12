@@ -4,7 +4,7 @@ const fs = require('fs');
 const crypto = require('crypto');
 const express = require('express');
 const multer = require('multer');
-const { db, hashPassword, verifyPassword, DATA_DIR } = require('./db');
+const { db, hashPassword, verifyPassword, DATA_DIR, MS_STATUSES } = require('./db');
 
 const PORT = Number(process.env.PORT) || 3000;
 const UPLOAD_DIR = process.env.UPLOAD_DIR || path.join(DATA_DIR, 'uploads');
@@ -127,39 +127,119 @@ app.post('/api/me/password', wrap((req, res) => {
 }));
 
 // ---------- meta ----------
-const getStages = () => db.prepare('SELECT * FROM stages ORDER BY position').all();
+const getMilestones = () => db.prepare('SELECT * FROM milestones ORDER BY position').all();
 app.get('/api/meta', (req, res) => {
   res.json({
-    stages: getStages(),
+    milestones: getMilestones(),
     users: db.prepare('SELECT id, name, email, role, active FROM users ORDER BY name').all(),
-    enums: ENUMS,
+    enums: { ...ENUMS, milestoneStatus: MS_STATUSES },
   });
 });
 
+// ---------- milestones ----------
+// Every project tracks each milestone separately, so work can finish in any order.
+const parseTs = (s) => Date.parse(String(s).replace(' ', 'T') + (String(s).includes('T') ? '' : 'Z'));
+
+// Adds `milestones` (one entry per configured milestone, in order) plus summary fields to each project.
+function attachMilestones(list) {
+  if (!list.length) return list;
+  const ms = getMilestones();
+  const ids = list.map((p) => p.id);
+  const by = {};
+  for (let i = 0; i < ids.length; i += 500) {
+    const chunk = ids.slice(i, i + 500);
+    db.prepare(`SELECT * FROM project_milestones WHERE project_id IN (${chunk.map(() => '?').join(',')})`).all(...chunk)
+      .forEach((r) => ((by[r.project_id] ||= {})[r.milestone_id] = r));
+  }
+  const t = Date.now();
+  for (const p of list) {
+    const mine = by[p.id] || {};
+    p.milestones = ms.map((m) => {
+      const r = mine[m.id];
+      const status = r?.status || 'not_started';
+      const days = status === 'in_progress' && r.started_at ? Math.max(0, Math.floor((t - parseTs(r.started_at)) / 864e5)) : null;
+      return { id: m.id, status, started_at: r?.started_at || null, completed_at: r?.completed_at || null, days_open: days, sla_days: m.sla_days, overdue: days != null && days > m.sla_days };
+    });
+    const needed = p.milestones.filter((x) => x.status !== 'not_needed');
+    p.ms_done = needed.filter((x) => x.status === 'done').length;
+    p.ms_total = needed.length;
+    p.ms_complete = p.phase === 'pipeline' && p.ms_done === p.ms_total;
+    p.ms_overdue = p.milestones.filter((x) => x.overdue).length;
+  }
+  return list;
+}
+const getProject = (id) => attachMilestones([db.prepare(`${PROJECT_SELECT} WHERE p.id = ?`).get(id)].filter(Boolean))[0];
+
+// Change one milestone's status, keeping dates and history. Call inside a transaction.
+function setMilestone(projectId, milestone, status, userId, note, t = now()) {
+  if (!MS_STATUSES.includes(status)) bad('Invalid milestone status');
+  const cur = db.prepare('SELECT * FROM project_milestones WHERE project_id = ? AND milestone_id = ?').get(projectId, milestone.id);
+  const from = cur?.status || 'not_started';
+  if (from === status && !note) return false;
+  const startedAt = status === 'in_progress' || status === 'done' ? (cur?.started_at || t) : status === 'not_started' ? null : cur?.started_at || null;
+  const completedAt = status === 'done' ? (from === 'done' ? cur.completed_at : t) : null;
+  db.prepare(`INSERT INTO project_milestones (project_id, milestone_id, status, started_at, completed_at, updated_at) VALUES (?,?,?,?,?,?)
+    ON CONFLICT(project_id, milestone_id) DO UPDATE SET status = excluded.status, started_at = excluded.started_at,
+      completed_at = excluded.completed_at, updated_at = excluded.updated_at`).run(projectId, milestone.id, status, startedAt, completedAt, t);
+  db.prepare('INSERT INTO milestone_history (project_id, milestone_id, milestone_name, from_status, to_status, user_id, note, changed_at) VALUES (?,?,?,?,?,?,?,?)')
+    .run(projectId, milestone.id, milestone.name, from, status, userId, note, t);
+  const lbl = (s) => s.replace('_', ' ');
+  logActivity(projectId, userId, 'milestone_updated', `${milestone.name}: ${lbl(from)} → ${lbl(status)}${note ? ` — ${note}` : ''}`);
+  return true;
+}
+
+// Apply a {milestone_id: status} map (used when a project enters the pipeline)
+function applyMilestoneMap(projectId, map, userId, note, t) {
+  if (!map || typeof map !== 'object') return;
+  const ms = Object.fromEntries(getMilestones().map((m) => [m.id, m]));
+  for (const [mid, status] of Object.entries(map)) {
+    if (!ms[mid]) bad('Unknown milestone');
+    if (status && status !== 'not_started') setMilestone(projectId, ms[mid], status, userId, note, t);
+  }
+}
+
+app.put('/api/projects/:id/milestones/:mid', wrap((req, res) => {
+  const p = db.prepare('SELECT * FROM projects WHERE id = ?').get(req.params.id) || notFound('Project not found');
+  if (p.phase === 'diligence') bad('Finish due diligence first, then use "Move to pipeline"');
+  const m = db.prepare('SELECT * FROM milestones WHERE id = ?').get(req.params.mid) || notFound('Milestone not found');
+  const note = req.body?.note ? String(req.body.note).slice(0, 2000) : null;
+  db.transaction(() => {
+    const t = now();
+    if (setMilestone(p.id, m, String(req.body?.status || ''), req.user.id, note, t)) {
+      db.prepare('UPDATE projects SET updated_at = ? WHERE id = ?').run(t, p.id);
+    }
+  })();
+  res.json(getProject(p.id));
+}));
+
 // ---------- dashboard ----------
+const OPEN = "('active','on_hold','blocked')";
 app.get('/api/dashboard', (req, res) => {
-  const stages = db.prepare(`SELECT s.id, s.name, s.color, s.stale_days, s.is_closed,
-      COUNT(p.id) AS count, COALESCE(SUM(p.estimated_value),0) AS value, COALESCE(SUM(p.charger_count),0) AS chargers
-    FROM stages s LEFT JOIN projects p ON p.stage_id = s.id AND p.status IN ('active','on_hold','blocked','won')
-    GROUP BY s.id ORDER BY s.position`).all();
+  const open = attachMilestones(db.prepare(`${PROJECT_SELECT} WHERE p.phase = 'pipeline' AND p.status IN ${OPEN}`).all());
+  const milestones = getMilestones().map((m, i) => {
+    const c = { not_started: 0, in_progress: 0, done: 0, not_needed: 0, overdue: 0 };
+    open.forEach((p) => { const x = p.milestones[i]; c[x.status]++; if (x.overdue) c.overdue++; });
+    return { ...m, ...c };
+  });
   const totals = db.prepare(`SELECT
-      COUNT(*) FILTER (WHERE phase = 'diligence' AND status IN ('active','on_hold','blocked')) AS in_diligence,
-      COUNT(*) FILTER (WHERE phase = 'pipeline' AND status IN ('active','on_hold','blocked')) AS open_projects,
+      COUNT(*) FILTER (WHERE phase = 'diligence' AND status IN ${OPEN}) AS in_diligence,
       COUNT(*) FILTER (WHERE status = 'on_hold') AS on_hold,
-      COUNT(*) FILTER (WHERE status = 'blocked') AS blocked,
-      COALESCE(SUM(estimated_value) FILTER (WHERE phase = 'pipeline' AND status IN ('active','on_hold','blocked')),0) AS pipeline_value,
-      COALESCE(SUM(charger_count) FILTER (WHERE phase = 'pipeline' AND status IN ('active','on_hold','blocked')),0) AS pipeline_chargers
+      COUNT(*) FILTER (WHERE status = 'blocked') AS blocked
     FROM projects`).get();
-  totals.live_chargers = db.prepare(`SELECT COALESCE(SUM(p.charger_count),0) c FROM projects p JOIN stages s ON s.id=p.stage_id WHERE s.is_closed=1 AND p.status NOT IN ('lost','cancelled')`).get().c;
+  const inProgress = open.filter((p) => !p.ms_complete);
+  totals.open_projects = inProgress.length;
+  totals.pipeline_value = inProgress.reduce((a, p) => a + (p.estimated_value || 0), 0);
+  totals.pipeline_chargers = inProgress.reduce((a, p) => a + (p.charger_count || 0), 0);
+  const live = attachMilestones(db.prepare(`${PROJECT_SELECT} WHERE p.phase = 'pipeline' AND p.status NOT IN ('lost','cancelled')`).all()).filter((p) => p.ms_complete);
+  totals.live_projects = live.length;
+  totals.live_chargers = live.reduce((a, p) => a + (p.charger_count || 0), 0);
   totals.open_tickets = db.prepare("SELECT COUNT(*) c FROM tickets WHERE status NOT IN ('resolved','closed')").get().c;
   totals.overdue_tickets = db.prepare("SELECT COUNT(*) c FROM tickets WHERE status NOT IN ('resolved','closed') AND due_date < date('now')").get().c;
 
-  const stalled = db.prepare(`SELECT p.id, p.code, p.name, p.customer_name, p.status, p.hold_reason, s.name AS stage_name, s.color AS stage_color,
-      s.stale_days, CAST(julianday('now') - julianday(p.stage_entered_at) AS INTEGER) AS days_in_stage, u.name AS owner_name
-    FROM projects p JOIN stages s ON s.id = p.stage_id LEFT JOIN users u ON u.id = p.owner_id
-    WHERE p.status IN ('active','on_hold','blocked') AND s.is_closed = 0
-      AND (julianday('now') - julianday(p.stage_entered_at) > s.stale_days OR p.status IN ('on_hold','blocked'))
-    ORDER BY days_in_stage DESC LIMIT 25`).all();
+  // needs attention: a milestone running past its SLA, or the project is on hold / blocked
+  const stalled = open.filter((p) => p.ms_overdue || ['on_hold', 'blocked'].includes(p.status))
+    .sort((a, b) => Math.max(0, ...b.milestones.map((x) => x.days_open || 0)) - Math.max(0, ...a.milestones.map((x) => x.days_open || 0)))
+    .slice(0, 25);
 
   const myTickets = db.prepare(`SELECT t.id, t.title, t.status, t.priority, t.due_date, p.id AS project_id, p.code, p.name AS project_name
     FROM tickets t JOIN projects p ON p.id = t.project_id
@@ -170,7 +250,7 @@ app.get('/api/dashboard', (req, res) => {
     LEFT JOIN users u ON u.id = a.user_id LEFT JOIN projects p ON p.id = a.project_id
     ORDER BY a.id DESC LIMIT 15`).all();
 
-  res.json({ stages, totals, stalled, myTickets, recent });
+  res.json({ milestones, totals, stalled, myTickets, recent });
 });
 
 // ---------- projects ----------
@@ -182,12 +262,12 @@ const PROJECT_FIELDS = ['name', 'customer_name', 'contact_name', 'contact_email'
 const DILIGENCE_REQUIRED = { property_owner: 'Property owner', rebate_program: 'Rebate the site qualifies for', utility_company: 'Utility company' };
 const diligenceMissing = (p) => Object.entries(DILIGENCE_REQUIRED).filter(([k]) => !String(p[k] ?? '').trim()).map(([, v]) => v);
 
-const PROJECT_SELECT = `SELECT p.*, s.name AS stage_name, s.color AS stage_color, s.stale_days, s.position AS stage_position,
-    u.name AS owner_name,
-    CAST(julianday('now') - julianday(p.stage_entered_at) AS INTEGER) AS days_in_stage,
+// days_in_phase = days in due diligence, or days since entering the pipeline
+const PROJECT_SELECT = `SELECT p.*, u.name AS owner_name,
+    CAST(julianday('now') - julianday(p.stage_entered_at) AS INTEGER) AS days_in_phase,
     (SELECT COUNT(*) FROM tickets t WHERE t.project_id = p.id AND t.status NOT IN ('resolved','closed')) AS open_tickets,
     (SELECT COUNT(*) FROM documents d WHERE d.project_id = p.id) AS doc_count
-  FROM projects p LEFT JOIN stages s ON s.id = p.stage_id LEFT JOIN users u ON u.id = p.owner_id`;
+  FROM projects p LEFT JOIN users u ON u.id = p.owner_id`;
 
 function validateProject(data) {
   if (data.status && !ENUMS.projectStatus.includes(data.status)) bad('Invalid status');
@@ -200,7 +280,7 @@ function validateProject(data) {
 
 app.get('/api/projects', (req, res) => {
   const where = []; const args = [];
-  const { q, stage_id, status, owner_id, priority, phase, state } = req.query;
+  const { q, status, owner_id, priority, phase, state, milestone_id, ms_status, progress } = req.query;
   if (phase) { where.push('p.phase = ?'); args.push(phase); }
   if (state === 'none') where.push("(p.state IS NULL OR p.state = '')");
   else if (state) { where.push('p.state = ?'); args.push(state); }
@@ -208,21 +288,41 @@ app.get('/api/projects', (req, res) => {
     where.push('(p.name LIKE ? OR p.code LIKE ? OR p.customer_name LIKE ? OR p.city LIKE ? OR p.address LIKE ? OR p.contact_name LIKE ? OR p.property_owner LIKE ? OR p.utility_company LIKE ?)');
     const like = `%${q}%`; args.push(like, like, like, like, like, like, like, like);
   }
-  if (stage_id) { where.push('p.stage_id = ?'); args.push(stage_id); }
-  if (status === 'open') where.push("p.status IN ('active','on_hold','blocked')");
+  if (status === 'open') where.push(`p.status IN ${OPEN}`);
   else if (status) { where.push('p.status = ?'); args.push(status); }
   if (owner_id) { where.push('p.owner_id = ?'); args.push(owner_id); }
   if (priority) { where.push('p.priority = ?'); args.push(priority); }
   const sql = `${PROJECT_SELECT} ${where.length ? 'WHERE ' + where.join(' AND ') : ''} ORDER BY p.updated_at DESC`;
-  res.json(db.prepare(sql).all(...args));
+  let rows = attachMilestones(db.prepare(sql).all(...args));
+  // milestone filters: e.g. "Permitting is in progress", "Contract still to do"
+  if (milestone_id) {
+    rows = rows.filter((p) => {
+      const x = p.milestones.find((m) => String(m.id) === String(milestone_id));
+      if (!x || p.phase !== 'pipeline') return false;
+      if (!ms_status) return true;
+      if (ms_status === 'todo') return x.status === 'not_started' || x.status === 'in_progress';
+      if (ms_status === 'overdue') return x.overdue;
+      return x.status === ms_status;
+    });
+  }
+  if (progress === 'complete') rows = rows.filter((p) => p.ms_complete);
+  else if (progress === 'incomplete') rows = rows.filter((p) => p.phase === 'pipeline' && !p.ms_complete);
+  else if (progress === 'overdue') rows = rows.filter((p) => p.ms_overdue);
+  res.json(rows);
 });
 
 app.get('/api/projects.csv', (req, res) => {
-  const rows = db.prepare(`${PROJECT_SELECT} ORDER BY p.id`).all();
+  const ms = getMilestones();
+  const rows = attachMilestones(db.prepare(`${PROJECT_SELECT} ORDER BY p.id`).all());
+  rows.forEach((r) => {
+    r.progress = r.phase === 'pipeline' ? `${r.ms_done}/${r.ms_total}` : '';
+    ms.forEach((m, i) => (r[`ms_${m.id}`] = r.phase === 'pipeline' ? r.milestones[i].status.replace('_', ' ') : ''));
+  });
   const cols = ['code', 'phase', 'name', 'customer_name', 'contact_name', 'contact_email', 'contact_phone', 'address', 'city', 'state', 'zip',
-    'site_type', 'charger_type', 'charger_count', 'power_kw', 'estimated_value', 'stage_name', 'days_in_stage', 'status', 'hold_reason',
+    'site_type', 'charger_type', 'charger_count', 'power_kw', 'estimated_value', 'progress', ...ms.map((m) => `ms_${m.id}`), 'status', 'hold_reason',
     'priority', 'owner_name', 'target_live_date', 'open_tickets', 'property_owner', 'property_owner_contact', 'rebate_program',
     'rebate_amount', 'utility_company', 'diligence_completed_at', 'created_at', 'updated_at'];
+  const head = cols.map((c) => (c.startsWith('ms_') ? ms.find((m) => `ms_${m.id}` === c).name : c));
   const esc = (v) => {
     if (v == null) return '';
     let s = String(v);
@@ -231,7 +331,7 @@ app.get('/api/projects.csv', (req, res) => {
   };
   res.setHeader('Content-Type', 'text/csv; charset=utf-8');
   res.setHeader('Content-Disposition', `attachment; filename="evium-projects-${new Date().toISOString().slice(0, 10)}.csv"`);
-  res.send([cols.join(','), ...rows.map((r) => cols.map((c) => esc(r[c])).join(','))].join('\n'));
+  res.send([head.map(esc).join(','), ...rows.map((r) => cols.map((c) => esc(r[c])).join(','))].join('\n'));
 });
 
 app.post('/api/projects', wrap((req, res) => {
@@ -240,30 +340,25 @@ app.post('/api/projects', wrap((req, res) => {
   validateProject(data);
   // New properties go to Due Diligence unless the caller explicitly creates a pipeline project.
   const phase = req.body.phase === 'pipeline' ? 'pipeline' : 'diligence';
-  let stageId = null;
-  if (phase === 'pipeline') {
-    stageId = Number(req.body.stage_id) || getStages()[0].id;
-    if (!db.prepare('SELECT 1 FROM stages WHERE id = ?').get(stageId)) bad('Invalid stage');
-  }
   const id = db.transaction(() => {
-    const cols = [...Object.keys(data), 'stage_id', 'phase'];
-    const vals = [...Object.keys(data).map((c) => data[c]), stageId, phase];
+    const cols = [...Object.keys(data), 'phase'];
+    const vals = [...Object.keys(data).map((c) => data[c]), phase];
     const info = db.prepare(`INSERT INTO projects (${cols.join(',')}) VALUES (${cols.map(() => '?').join(',')})`).run(...vals);
     const pid = info.lastInsertRowid;
     db.prepare('UPDATE projects SET code = ? WHERE id = ?').run(`EV-${String(pid).padStart(4, '0')}`, pid);
-    if (stageId) db.prepare('INSERT INTO stage_history (project_id, from_stage_id, to_stage_id, user_id, note) VALUES (?,?,?,?,?)').run(pid, null, stageId, req.user.id, 'Project created');
     logActivity(pid, req.user.id, 'project_created', phase === 'diligence' ? `${data.name} (added to due diligence)` : data.name);
+    if (phase === 'pipeline') applyMilestoneMap(pid, req.body.milestones, req.user.id, null, now());
     return pid;
   })();
-  res.status(201).json(db.prepare(`${PROJECT_SELECT} WHERE p.id = ?`).get(id));
+  res.status(201).json(getProject(id));
 }));
 
 app.get('/api/projects/:id', (req, res) => {
-  const p = db.prepare(`${PROJECT_SELECT} WHERE p.id = ?`).get(req.params.id);
+  const p = getProject(req.params.id);
   if (!p) return res.status(404).json({ error: 'Project not found' });
-  p.history = db.prepare(`SELECT h.*, fs.name AS from_name, ts.name AS to_name, ts.color AS to_color, u.name AS user_name
-    FROM stage_history h LEFT JOIN stages fs ON fs.id = h.from_stage_id LEFT JOIN stages ts ON ts.id = h.to_stage_id
-    LEFT JOIN users u ON u.id = h.user_id WHERE h.project_id = ? ORDER BY h.changed_at, h.id`).all(p.id);
+  p.history = db.prepare(`SELECT h.*, COALESCE(m.name, h.milestone_name) AS milestone, m.color, u.name AS user_name
+    FROM milestone_history h LEFT JOIN milestones m ON m.id = h.milestone_id LEFT JOIN users u ON u.id = h.user_id
+    WHERE h.project_id = ? ORDER BY h.changed_at DESC, h.id DESC`).all(p.id);
   res.json(p);
 });
 
@@ -280,43 +375,23 @@ app.patch('/api/projects/:id', wrap((req, res) => {
     const other = changed.filter((c) => c !== 'status');
     if (other.length) logActivity(p.id, req.user.id, 'project_updated', other.join(', '));
   }
-  res.json(db.prepare(`${PROJECT_SELECT} WHERE p.id = ?`).get(p.id));
+  res.json(getProject(p.id));
 }));
 
-app.post('/api/projects/:id/stage', wrap((req, res) => {
-  const p = db.prepare('SELECT * FROM projects WHERE id = ?').get(req.params.id) || notFound('Project not found');
-  if (p.phase === 'diligence') bad('Finish due diligence first, then use "Move to pipeline"');
-  const to = db.prepare('SELECT * FROM stages WHERE id = ?').get(Number(req.body?.stage_id)) || bad('Invalid stage');
-  if (to.id !== p.stage_id) {
-    const note = req.body?.note ? String(req.body.note).slice(0, 2000) : null;
-    db.transaction(() => {
-      const t = now();
-      db.prepare('UPDATE projects SET stage_id = ?, stage_entered_at = ?, updated_at = ? WHERE id = ?').run(to.id, t, t, p.id);
-      db.prepare('INSERT INTO stage_history (project_id, from_stage_id, to_stage_id, user_id, note, changed_at) VALUES (?,?,?,?,?,?)').run(p.id, p.stage_id, to.id, req.user.id, note, t);
-      const from = db.prepare('SELECT name FROM stages WHERE id = ?').get(p.stage_id);
-      logActivity(p.id, req.user.id, 'stage_changed', `${from?.name || '—'} → ${to.name}${note ? `: ${note}` : ''}`);
-    })();
-  }
-  res.json(db.prepare(`${PROJECT_SELECT} WHERE p.id = ?`).get(p.id));
-}));
-
-// Due diligence done: move the property into the pipeline at the stage the user picks
+// Due diligence done: move the property into the pipeline, marking any milestones already under way
 app.post('/api/projects/:id/promote', wrap((req, res) => {
   const p = db.prepare('SELECT * FROM projects WHERE id = ?').get(req.params.id) || notFound('Project not found');
   if (p.phase !== 'diligence') bad('This project is already in the pipeline');
   const missing = diligenceMissing(p);
   if (missing.length) bad(`Due diligence isn't finished. Still missing: ${missing.join(', ')}`);
-  const to = db.prepare('SELECT * FROM stages WHERE id = ?').get(Number(req.body?.stage_id)) || bad('Pick a pipeline stage');
   const note = req.body?.note ? String(req.body.note).slice(0, 2000) : null;
   db.transaction(() => {
     const t = now();
-    db.prepare("UPDATE projects SET phase = 'pipeline', stage_id = ?, stage_entered_at = ?, diligence_completed_at = ?, updated_at = ? WHERE id = ?")
-      .run(to.id, t, t, t, p.id);
-    db.prepare('INSERT INTO stage_history (project_id, from_stage_id, to_stage_id, user_id, note, changed_at) VALUES (?,?,?,?,?,?)')
-      .run(p.id, null, to.id, req.user.id, `Due diligence complete${note ? `: ${note}` : ''}`, t);
-    logActivity(p.id, req.user.id, 'moved_to_pipeline', `Due diligence → ${to.name}${note ? `: ${note}` : ''}`);
+    db.prepare("UPDATE projects SET phase = 'pipeline', stage_entered_at = ?, diligence_completed_at = ?, updated_at = ? WHERE id = ?").run(t, t, t, p.id);
+    logActivity(p.id, req.user.id, 'moved_to_pipeline', `Due diligence complete${note ? `: ${note}` : ''}`);
+    applyMilestoneMap(p.id, req.body?.milestones, req.user.id, null, t);
   })();
-  res.json(db.prepare(`${PROJECT_SELECT} WHERE p.id = ?`).get(p.id));
+  res.json(getProject(p.id));
 }));
 
 app.delete('/api/projects/:id', requireAdmin, wrap((req, res) => {
@@ -527,30 +602,23 @@ app.patch('/api/users/:id', requireAdmin, wrap((req, res) => {
   res.json({ ok: true });
 }));
 
-// ---------- admin: funnel stages ----------
-app.put('/api/stages', requireAdmin, wrap((req, res) => {
-  const list = Array.isArray(req.body) ? req.body : bad('Expected an array of stages');
-  if (!list.length) bad('At least one stage is required');
-  const existing = new Set(getStages().map((s) => s.id));
-  const keep = new Set(list.filter((s) => s.id).map((s) => Number(s.id)));
+// ---------- admin: milestones ----------
+app.put('/api/milestones', requireAdmin, wrap((req, res) => {
+  const list = Array.isArray(req.body) ? req.body : bad('Expected a list of milestones');
+  if (!list.length) bad('At least one milestone is required');
+  const existing = new Set(getMilestones().map((m) => m.id));
+  const keep = new Set(list.filter((m) => m.id).map((m) => Number(m.id)));
   db.transaction(() => {
-    for (const id of existing) {
-      if (!keep.has(id)) {
-        const used = db.prepare('SELECT COUNT(*) c FROM projects WHERE stage_id = ?').get(id).c;
-        if (used) bad(`Cannot remove a stage that still has ${used} project(s). Move them first.`);
-        db.prepare('UPDATE stage_history SET from_stage_id = NULL WHERE from_stage_id = ?').run(id);
-        db.prepare('UPDATE stage_history SET to_stage_id = NULL WHERE to_stage_id = ?').run(id);
-        db.prepare('DELETE FROM stages WHERE id = ?').run(id);
-      }
-    }
-    list.forEach((s, i) => {
-      if (!s.name) bad('Every stage needs a name');
-      const vals = [String(s.name), i + 1, /^#[0-9a-f]{6}$/i.test(s.color) ? s.color : '#64748b', Math.max(1, Number(s.stale_days) || 14), s.is_closed ? 1 : 0];
-      if (s.id && existing.has(Number(s.id))) db.prepare('UPDATE stages SET name=?, position=?, color=?, stale_days=?, is_closed=? WHERE id=?').run(...vals, Number(s.id));
-      else db.prepare('INSERT INTO stages (name, position, color, stale_days, is_closed) VALUES (?,?,?,?,?)').run(...vals);
+    // removing a milestone drops it from every project (its history entries keep the name)
+    for (const id of existing) if (!keep.has(id)) db.prepare('DELETE FROM milestones WHERE id = ?').run(id);
+    list.forEach((m, i) => {
+      if (!String(m.name || '').trim()) bad('Every milestone needs a name');
+      const vals = [String(m.name).trim(), i + 1, /^#[0-9a-f]{6}$/i.test(m.color) ? m.color : '#64748b', Math.max(1, Number(m.sla_days) || 30)];
+      if (m.id && existing.has(Number(m.id))) db.prepare('UPDATE milestones SET name=?, position=?, color=?, sla_days=? WHERE id=?').run(...vals, Number(m.id));
+      else db.prepare('INSERT INTO milestones (name, position, color, sla_days) VALUES (?,?,?,?)').run(...vals);
     });
   })();
-  res.json(getStages());
+  res.json(getMilestones());
 }));
 
 // ---------- static frontend ----------

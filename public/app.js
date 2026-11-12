@@ -30,12 +30,10 @@ const badge = (cls, text) => `<span class="badge ${cls}">${esc(text)}</span>`;
 const statusBadge = (s) => badge(`s-${s}`, label(s));
 const ticketBadge = (s) => badge(`t-${s}`, label(s));
 const prioBadge = (p) => badge(`p-${p}`, label(p));
-const stageBadge = (name, color) => `<span class="badge"><span class="dot" style="background:${esc(color)}"></span>${esc(name || '—')}</span>`;
 const options = (list, sel, { blank, fmt = label } = {}) =>
   (blank !== undefined ? `<option value="">${esc(blank)}</option>` : '') +
   list.map((v) => { const [val, txt] = Array.isArray(v) ? v : [v, fmt(v)]; return `<option value="${esc(val)}" ${String(val) === String(sel ?? '') ? 'selected' : ''}>${esc(txt)}</option>`; }).join('');
 const userOptions = (sel, blank = 'Unassigned') => options(S.meta.users.filter((u) => u.active || String(u.id) === String(sel)).map((u) => [u.id, u.name]), sel, { blank });
-const stageOptions = (sel) => options(S.meta.stages.map((s) => [s.id, s.name]), sel);
 const US_STATES = [['AL', 'Alabama'], ['AK', 'Alaska'], ['AZ', 'Arizona'], ['AR', 'Arkansas'], ['CA', 'California'], ['CO', 'Colorado'],
   ['CT', 'Connecticut'], ['DE', 'Delaware'], ['DC', 'District of Columbia'], ['FL', 'Florida'], ['GA', 'Georgia'], ['HI', 'Hawaii'], ['ID', 'Idaho'],
   ['IL', 'Illinois'], ['IN', 'Indiana'], ['IA', 'Iowa'], ['KS', 'Kansas'], ['KY', 'Kentucky'], ['LA', 'Louisiana'], ['ME', 'Maine'], ['MD', 'Maryland'],
@@ -51,7 +49,40 @@ const stateOptions = (sel) => options(sel && !US_STATES.some(([c]) => c === sel)
 const DD_CHECKS = [['property_owner', 'Property owner'], ['rebate_program', 'Rebate'], ['utility_company', 'Utility company']];
 const ddMissing = (p) => DD_CHECKS.filter(([k]) => !String(p[k] ?? '').trim());
 const phaseBadge = () => badge('ph-dd', 'Due diligence');
-const isStale = (p) => p.days_in_stage > p.stale_days && ['active', 'on_hold', 'blocked'].includes(p.status);
+// ---------- milestones ----------
+// Each project tracks every milestone on its own; they can be finished in any order.
+const MS_STATUSES = ['not_started', 'in_progress', 'done', 'not_needed'];
+const MS_LABEL = { not_started: 'Not started', in_progress: 'In progress', done: 'Done', not_needed: 'Not needed' };
+const MS_ICON = { not_started: '○', in_progress: '●', done: '✓', not_needed: '–' };
+const OPEN_STATUSES = ['active', 'on_hold', 'blocked'];
+const msWhen = (x) => (x.status === 'done' && x.completed_at ? `done ${fdate(x.completed_at)}`
+  : x.status === 'in_progress' ? `${x.days_open ?? 0}d in progress${x.overdue ? ` · over ${x.sla_days}d target` : ''}` : '');
+// small row of chips: one per milestone, showing its status
+const msStrip = (p, { names = true } = {}) => `<span class="ms-strip">${S.meta.milestones.map((m, i) => {
+  const x = p.milestones?.[i] || { status: 'not_started' };
+  return `<span class="ms ms-${x.status}${x.overdue ? ' ms-overdue' : ''}" title="${esc(m.name)}: ${MS_LABEL[x.status]}${msWhen(x) ? ` (${esc(msWhen(x))})` : ''}">${MS_ICON[x.status]}${names ? ` ${esc(m.name)}` : ''}</span>`;
+}).join('')}</span>`;
+const progressBadge = (p) => (p.phase === 'diligence' ? phaseBadge() : p.ms_complete ? badge('ms-live', '✓ Live') : badge('', `${p.ms_done}/${p.ms_total} done`));
+const isFlagged = (p) => p.ms_overdue > 0 && OPEN_STATUSES.includes(p.status);
+// full editor: each milestone with a 4-way switch
+const msEditor = (p) => `<div class="ms-editor">${S.meta.milestones.map((m, i) => {
+  const x = p.milestones[i];
+  return `<div class="ms-row ${x.overdue ? 'ms-overdue' : ''}">
+    <div class="ms-name"><span class="dot" style="background:${esc(m.color)}"></span><b>${esc(m.name)}</b><span class="small ${x.overdue ? 'stale' : 'muted'}">${esc(msWhen(x))}</span></div>
+    <div class="seg" role="group" aria-label="${esc(m.name)}">${MS_STATUSES.map((s) => `<button type="button" class="${x.status === s ? `on is-${s}` : ''}" data-ms="${m.id}" data-pid="${p.id}" data-st="${s}" aria-pressed="${x.status === s}">${MS_LABEL[s]}</button>`).join('')}</div>
+  </div>`;
+}).join('')}</div>`;
+function bindMsEditor(root, after) {
+  $$('[data-ms]', root).forEach((b) => (b.onclick = async (e) => {
+    e.stopPropagation();
+    if (b.classList.contains('on')) return;
+    try {
+      const saved = await api('PUT', `/api/projects/${b.dataset.pid}/milestones/${b.dataset.ms}`, { status: b.dataset.st });
+      toast(saved.ms_complete ? `${saved.code}: all milestones finished 🎉` : 'Milestone updated');
+      after(saved);
+    } catch (err) { fail(err); }
+  }));
+}
 
 async function api(method, url, body) {
   const opt = { method, headers: {} };
@@ -139,11 +170,15 @@ async function boot() {
 }
 
 // ---------- router ----------
+let lastPath = '';
 window.addEventListener('hashchange', route);
 async function route() {
   if (!S.me) return;
-  const parts = (location.hash.replace(/^#\/?/, '') || 'dashboard').split('?')[0].split('/');
+  const path = (location.hash.replace(/^#\/?/, '') || 'dashboard').split('?')[0];
+  const parts = path.split('/');
   const [page, id] = parts;
+  // start at the top when opening a different page (filter changes keep the scroll position)
+  if (path !== lastPath) { window.scrollTo(0, 0); lastPath = path; }
   $$('[data-nav]').forEach((a) => a.classList.toggle('active', a.dataset.nav === page));
   if (!$('#modal').classList.contains('hidden')) { modalClose = null; closeModal(); }
   try {
@@ -163,34 +198,41 @@ const qs = () => new URLSearchParams(location.hash.split('?')[1] || '');
 async function renderDashboard() {
   const d = await api('GET', '/api/dashboard');
   const t = d.totals;
-  const max = Math.max(1, ...d.stages.map((s) => s.count));
+  const total = Math.max(1, ...d.milestones.map((m) => m.done + m.in_progress + m.not_started));
   view.innerHTML = `
-    <div class="page-head"><h1>Dashboard</h1><div class="actions"><button class="btn primary" id="newProject">+ New project</button></div></div>
+    <div class="page-head"><h1>Dashboard</h1><div class="actions"><button class="btn primary" id="newProject">+ New property</button></div></div>
     <div class="kpis">
       <a class="card kpi" href="#/diligence"><div class="l">In due diligence</div><div class="v">${num(t.in_diligence)}</div></a>
-      <div class="card kpi"><div class="l">Open in pipeline</div><div class="v">${num(t.open_projects)}</div></div>
+      <a class="card kpi" href="#/pipeline"><div class="l">Projects in progress</div><div class="v">${num(t.open_projects)}</div></a>
       <div class="card kpi"><div class="l">Pipeline value</div><div class="v">${money(t.pipeline_value)}</div></div>
       <div class="card kpi"><div class="l">Ports in pipeline</div><div class="v">${num(t.pipeline_chargers)}</div></div>
-      <div class="card kpi"><div class="l">Ports live</div><div class="v">${num(t.live_chargers)}</div></div>
-      <div class="card kpi"><div class="l">On hold / blocked</div><div class="v">${num(t.on_hold)} / ${num(t.blocked)}</div></div>
+      <div class="card kpi"><div class="l">Live</div><div class="v">${num(t.live_projects)} <span class="small muted">${num(t.live_chargers)} ports</span></div></div>
       <div class="card kpi"><div class="l">Open tickets</div><div class="v">${num(t.open_tickets)} ${t.overdue_tickets ? `<span class="small stale">${t.overdue_tickets} overdue</span>` : ''}</div></div>
     </div>
     <div class="cols-main">
       <div class="grid" style="gap:16px">
-        <div class="card"><h2>Funnel — where projects are holding</h2>
-          <div class="funnel">${d.stages.map((s) => `
-            <div class="funnel-row" data-stage="${s.id}" title="View projects in ${esc(s.name)}">
-              <div>${esc(s.name)}</div>
-              <div class="bar-track"><div class="bar" style="width:${(s.count / max) * 100}%;background:${esc(s.color)}">${s.count || ''}</div></div>
-              <div class="muted small" style="text-align:right">${money(s.value)}</div>
-            </div>`).join('')}</div>
+        <div class="card"><h2>Milestones across open projects</h2>
+          <p class="muted small" style="margin-top:-6px">Projects work on several milestones at once. Click a milestone to see who still needs it.</p>
+          <div class="funnel">${d.milestones.map((m) => {
+            const w = (n) => `${(n / total) * 100}%`;
+            return `<div class="funnel-row ms-funnel" data-mid="${m.id}" title="Projects still needing ${esc(m.name)}">
+              <div><span class="dot" style="background:${esc(m.color)}"></span> ${esc(m.name)}</div>
+              <div class="bar-track stack">
+                <div class="seg-done" style="width:${w(m.done)}">${m.done || ''}</div>
+                <div class="seg-prog" style="width:${w(m.in_progress)}">${m.in_progress || ''}</div>
+                <div class="seg-todo" style="width:${w(m.not_started)}">${m.not_started || ''}</div>
+              </div>
+              <div class="small" style="text-align:right">${m.overdue ? `<span class="stale">${m.overdue} late</span>` : `<span class="muted">${m.not_needed ? `${m.not_needed} n/a` : ''}</span>`}</div>
+            </div>`;
+          }).join('')}</div>
+          <div class="legend small muted"><span><i class="seg-done"></i>Done</span><span><i class="seg-prog"></i>In progress</span><span><i class="seg-todo"></i>Not started</span></div>
         </div>
-        <div class="card"><h2>Needs attention <span class="muted small">— past stage SLA, on hold or blocked</span></h2>
-          ${d.stalled.length ? `<div class="table-wrap" style="box-shadow:none"><table><thead><tr><th>Project</th><th>Stage</th><th>Days in stage</th><th>Status</th><th>Owner</th></tr></thead><tbody>
+        <div class="card"><h2>Needs attention <span class="muted small">— a milestone running past its target, on hold or blocked</span></h2>
+          ${d.stalled.length ? `<div class="table-wrap" style="box-shadow:none"><table><thead><tr><th>Project</th><th>Milestones</th><th>Status</th><th>Owner</th></tr></thead><tbody>
           ${d.stalled.map((p) => `<tr class="clickable" data-href="#/projects/${p.id}">
-            <td><b>${esc(p.name)}</b><div class="muted small">${esc(p.code)} · ${esc(p.customer_name || '')}</div></td>
-            <td>${stageBadge(p.stage_name, p.stage_color)}</td>
-            <td class="${p.days_in_stage > p.stale_days ? 'stale' : ''}">${p.days_in_stage}d <span class="muted small">/ ${p.stale_days}d</span></td>
+            <td><b>${esc(p.address || p.name)}</b><div class="muted small">${esc(p.code)} · ${esc(p.name)}</div></td>
+            <td>${msStrip(p, { names: false })}
+              <div class="small stale">${p.milestones.map((x, i) => (x.overdue ? `${esc(S.meta.milestones[i].name)} ${x.days_open}d` : '')).filter(Boolean).join(' · ')}</div></td>
             <td>${statusBadge(p.status)}${p.hold_reason ? `<div class="muted small">${esc(p.hold_reason)}</div>` : ''}</td>
             <td>${esc(p.owner_name || '—')}</td></tr>`).join('')}
           </tbody></table></div>` : '<div class="empty">Nothing stalled. 🎉</div>'}
@@ -207,12 +249,12 @@ async function renderDashboard() {
       </div>
     </div>`;
   $('#newProject').onclick = () => projectForm();
-  $$('.funnel-row', view).forEach((r) => (r.onclick = () => (location.hash = `#/projects?stage_id=${r.dataset.stage}`)));
+  $$('.ms-funnel', view).forEach((r) => (r.onclick = () => (location.hash = `#/pipeline?milestone_id=${r.dataset.mid}&ms_status=todo`)));
   bindRowLinks();
 }
 
 function activityItem(a) {
-  const icons = { moved_to_pipeline: '✅', project_created: '🆕', stage_changed: '➡️', status_changed: '🚦', project_updated: '✏️', ticket_created: '🎫', ticket_updated: '🎫', ticket_deleted: '🗑️', documents_uploaded: '📎', document_deleted: '🗑️', note: '📝' };
+  const icons = { milestone_updated: '🏁', moved_to_pipeline: '✅', project_created: '🆕', stage_changed: '➡️', status_changed: '🚦', project_updated: '✏️', ticket_created: '🎫', ticket_updated: '🎫', ticket_deleted: '🗑️', documents_uploaded: '📎', document_deleted: '🗑️', note: '📝' };
   const proj = a.project_name ? ` <a href="#/projects/${a.project_id}">${esc(a.code)}</a>` : '';
   const body = a.action === 'note' ? `<div class="note">${esc(a.detail)}</div>` : `<span>${esc(a.detail || '')}</span>`;
   return `<div class="feed-item">${icons[a.action] || '•'} <b>${esc(a.user_name || 'System')}</b> <span class="muted">${esc(label(a.action))}</span>${proj}
@@ -250,7 +292,7 @@ async function renderDiligence() {
       <td>${esc(p.rebate_program || '—')}${p.rebate_amount ? `<div class="muted small">${money(p.rebate_amount)}</div>` : ''}</td>
       <td>${esc(p.utility_company || '—')}</td>
       <td><div class="checks">${DD_CHECKS.map(([k, t]) => `<span class="chk ${String(p[k] ?? '').trim() ? 'ok' : ''}" title="${esc(t)}">${String(p[k] ?? '').trim() ? '✓' : '○'} ${esc(t)}</span>`).join('')}</div></td>
-      <td class="muted">${p.days_in_stage}d</td>
+      <td class="muted">${p.days_in_phase}d</td>
       <td style="text-align:right">${missing.length
         ? `<button class="btn sm" data-edit="${p.id}">Fill in details</button>`
         : `<button class="btn sm primary" data-promote="${p.id}">Move to pipeline →</button>`}</td></tr>`;
@@ -285,15 +327,19 @@ function promoteModal(p, after) {
       <dt>Utility</dt><dd>${esc(p.utility_company)}</dd></dl>
     ${p.state ? '' : '<p class="small" style="color:var(--warn)">No state is set, so it will show under "No state" in the pipeline. Edit the property to add one.</p>'}
     <form class="grid">
-      <label>Pipeline stage to start in<select name="stage_id">${stageOptions(S.meta.stages[0]?.id)}</select></label>
+      <div><div class="small" style="font-weight:600;color:#334155;margin-bottom:6px">Anything already under way? (you can change these any time)</div>
+        <div class="ms-pick">${S.meta.milestones.map((m) => `<label class="ms-pick-row"><span><span class="dot" style="background:${esc(m.color)}"></span> ${esc(m.name)}</span>
+          <select name="ms_${m.id}">${options(MS_STATUSES.map((s) => [s, MS_LABEL[s]]), 'not_started')}</select></label>`).join('')}</div></div>
       <label>Note (optional)<textarea name="note" placeholder="e.g. Owner signed LOI, utility confirmed capacity"></textarea></label>
       <div class="modal-foot"><button type="button" class="btn" data-close>Cancel</button><button class="btn primary">Move to pipeline</button></div>
     </form>`);
   $('form', card).addEventListener('submit', async (e) => {
     e.preventDefault();
+    const f = formData(e.target); const milestones = {};
+    S.meta.milestones.forEach((m) => { if (f[`ms_${m.id}`] && f[`ms_${m.id}`] !== 'not_started') milestones[m.id] = f[`ms_${m.id}`]; });
     try {
-      const saved = await api('POST', `/api/projects/${p.id}/promote`, formData(e.target));
-      modalClose = null; closeModal(); toast(`${saved.code} moved to ${saved.stage_name}`); after?.();
+      const saved = await api('POST', `/api/projects/${p.id}/promote`, { note: f.note, milestones });
+      modalClose = null; closeModal(); toast(`${saved.code} moved to the pipeline`); after?.();
     } catch (err) { fail(err); }
   });
 }
@@ -302,46 +348,42 @@ function promoteModal(p, after) {
 const laneKey = 'evium.pipeline.collapsed';
 const getCollapsed = () => { try { return new Set(JSON.parse(localStorage.getItem(laneKey) || '[]')); } catch { return new Set(); } };
 const setCollapsed = (set) => { try { localStorage.setItem(laneKey, JSON.stringify([...set])); } catch { /* storage unavailable */ } };
-const openRows = new Set(); // rows whose stage steps are showing
+const openRows = new Set(); // rows showing their milestone switches
 
 async function renderPipeline() {
-  const params = new URLSearchParams({ phase: 'pipeline', status: qs().get('status') || 'open' });
-  if (qs().get('owner_id')) params.set('owner_id', qs().get('owner_id'));
-  if (qs().get('stage_id')) params.set('stage_id', qs().get('stage_id'));
-  const stateSel = qs().get('state') || '';
+  const q = qs();
+  const params = new URLSearchParams({ phase: 'pipeline', status: q.get('status') || 'open' });
+  ['owner_id', 'milestone_id', 'ms_status', 'progress'].forEach((k) => q.get(k) && params.set(k, q.get(k)));
+  const stateSel = q.get('state') || '';
   const all = await api('GET', `/api/projects?${params}`);
   const keyOf = (p) => (p.state || '').toUpperCase() || 'none';
   const groups = {};
   all.forEach((p) => (groups[keyOf(p)] ||= []).push(p));
-  // within a state: furthest-along stage first, then longest in stage
-  Object.values(groups).forEach((l) => l.sort((a, b) => (b.stage_position || 0) - (a.stage_position || 0) || b.days_in_stage - a.days_in_stage));
+  // within a state: unfinished first, most milestones done first, live projects last
+  Object.values(groups).forEach((l) => l.sort((a, b) => a.ms_complete - b.ms_complete || (b.ms_done / (b.ms_total || 1)) - (a.ms_done / (a.ms_total || 1))));
   const keys = Object.keys(groups).sort((a, b) => (a === 'none') - (b === 'none') || stateName(a).localeCompare(stateName(b)));
   const shown = stateSel ? keys.filter((k) => k === stateSel) : keys;
   const collapsed = getCollapsed();
   const sum = (list, f) => list.reduce((a, p) => a + (p[f] || 0), 0);
-  const total = S.meta.stages.length;
 
   const row = (p) => {
-    const idx = S.meta.stages.findIndex((s) => s.id === p.stage_id);
     const open = openRows.has(p.id);
     const line1 = p.address || p.name;
     const line2 = [[p.city, p.state].filter(Boolean).join(', '), p.address ? p.name : '', p.code].filter(Boolean).join(' · ');
-    const cls = isStale(p) ? 'is-stale' : ['on_hold', 'blocked'].includes(p.status) ? 'is-hold' : '';
+    const cls = isFlagged(p) ? 'is-stale' : ['on_hold', 'blocked'].includes(p.status) ? 'is-hold' : '';
     return `<div class="prow ${cls} ${open ? 'open' : ''}">
       <button class="prow-main" type="button" data-row="${p.id}" aria-expanded="${open}">
         <span class="prow-addr"><b>${esc(line1)}</b><span class="muted small">${esc(line2)}</span></span>
-        <span class="stage-tag" title="Stage ${idx + 1} of ${total}"><span class="dot" style="background:${esc(p.stage_color)}"></span>${esc(p.stage_name || '—')}<span class="muted">${idx + 1}/${total}</span></span>
-        <span class="prow-days small ${isStale(p) ? 'stale' : 'muted'}">${p.days_in_stage}d</span>
+        ${msStrip(p)}
+        <span class="prow-prog">${progressBadge(p)}</span>
         <span class="prow-extra small">${p.status !== 'active' ? statusBadge(p.status) : ''}${p.estimated_value ? `<span class="muted">${money(p.estimated_value)}</span>` : ''}</span>
         <span class="caret muted">${open ? '▾' : '▸'}</span>
       </button>
       ${open ? `<div class="prow-detail">
-        <div class="stepper">${S.meta.stages.map((s, i) =>
-          `<button class="step ${i < idx ? 'done' : i === idx ? 'current' : ''}" data-move="${p.id}" data-stage="${s.id}" title="Move to ${esc(s.name)}">${esc(s.name)}</button>`).join('')}</div>
+        ${msEditor(p)}
         <div class="prow-facts small">
           <span>${p.customer_name ? esc(p.customer_name) : '<span class="muted">No customer</span>'}</span>
           ${p.charger_count ? `<span>${p.charger_count}× ${esc(p.charger_type || 'ports')}</span>` : ''}
-          <span class="${isStale(p) ? 'stale' : 'muted'}">${p.days_in_stage} days in stage${isStale(p) ? ` (SLA ${p.stale_days}d)` : ''}</span>
           ${p.owner_name ? `<span>👤 ${esc(p.owner_name)}</span>` : ''}
           ${p.open_tickets ? `<span>🎫 ${p.open_tickets} open</span>` : ''}
           ${p.hold_reason && p.status !== 'active' ? `<span style="color:var(--warn)">${esc(p.hold_reason)}</span>` : ''}
@@ -364,29 +406,33 @@ async function renderPipeline() {
     </section>`;
   };
 
+  const msOpts = S.meta.milestones.map((m) => [m.id, m.name]);
   view.innerHTML = `
     <div class="page-head"><h1>Pipeline <span class="muted small">${all.length}</span></h1>
-      <div class="actions">
-        <select id="pStage">${options(S.meta.stages.map((s) => [s.id, s.name]), params.get('stage_id'), { blank: 'All stages' })}</select>
-        <select id="pStatus">${options([['open', 'Open (active/hold/blocked)'], ['active', 'Active'], ['on_hold', 'On hold'], ['blocked', 'Blocked'], ['won', 'Won'], ['', 'All statuses']], params.get('status'))}</select>
-        <select id="pOwner">${options(S.meta.users.map((u) => [u.id, u.name]), params.get('owner_id'), { blank: 'All owners' })}</select>
-        <a class="btn" href="#/diligence">Due diligence →</a>
-      </div></div>
+      <div class="actions"><a class="btn" href="#/diligence">Due diligence →</a></div></div>
+    <form class="filters" id="pFilters">
+      <select name="milestone_id">${options(msOpts, q.get('milestone_id'), { blank: 'Any milestone' })}</select>
+      <select name="ms_status" ${q.get('milestone_id') ? '' : 'disabled'}>${options([['todo', 'Still to do'], ...MS_STATUSES.map((s) => [s, MS_LABEL[s]]), ['overdue', 'Running late']], q.get('ms_status'), { blank: 'Any status' })}</select>
+      <select name="progress">${options([['incomplete', 'Still in progress'], ['complete', 'Live (all done)'], ['overdue', 'Running late']], q.get('progress'), { blank: 'All projects' })}</select>
+      <select name="status">${options([['open', 'Open (active/hold/blocked)'], ['active', 'Active'], ['on_hold', 'On hold'], ['blocked', 'Blocked'], ['won', 'Won'], ['', 'All statuses']], params.get('status'))}</select>
+      <select name="owner_id">${options(S.meta.users.map((u) => [u.id, u.name]), q.get('owner_id'), { blank: 'All owners' })}</select>
+    </form>
     <div class="chips">
       <button class="chip ${stateSel ? '' : 'active'}" data-state="">All states <span>${all.length}</span></button>
       ${keys.map((k) => `<button class="chip ${stateSel === k ? 'active' : ''}" data-state="${esc(k)}" title="${esc(stateName(k))}">${k === 'none' ? 'No state' : esc(k)} <span>${groups[k].length}</span></button>`).join('')}
     </div>
-    <p class="muted small">One row per site, grouped by state. Click a row to see all the stages and move it along. Red edge = past the stage SLA; amber = on hold or blocked.</p>
-    ${shown.map(lane).join('') || `<div class="card empty">${stateSel ? 'No projects in this state.' : 'No projects in the pipeline yet. Finish due diligence on a property to move it here.'}</div>`}`;
+    <p class="muted small">Milestones can be finished in any order. ✓ done · ● in progress · ○ not started · – not needed. Click a row to update its milestones. A red edge means a milestone is running past its target.</p>
+    ${shown.map(lane).join('') || `<div class="card empty">${stateSel ? 'No projects in this state.' : 'No projects match. Finish due diligence on a property to move it here.'}</div>`}`;
 
+  const form = $('#pFilters');
   const go = (over = {}) => {
-    const p = new URLSearchParams(); p.set('status', $('#pStatus').value);
-    if ($('#pOwner').value) p.set('owner_id', $('#pOwner').value);
-    if ($('#pStage').value) p.set('stage_id', $('#pStage').value);
+    const p = new URLSearchParams();
+    Object.entries(formData(form)).forEach(([k, v]) => { if (v || k === 'status') p.set(k, v); });
+    if (!p.get('milestone_id')) p.delete('ms_status');
     const st = 'state' in over ? over.state : stateSel; if (st) p.set('state', st);
     location.hash = `#/pipeline?${p}`;
   };
-  $('#pStatus').onchange = () => go(); $('#pOwner').onchange = () => go(); $('#pStage').onchange = () => go();
+  $$('select', form).forEach((s) => (s.onchange = () => go()));
   $$('.chip', view).forEach((c) => (c.onclick = () => go({ state: c.dataset.state })));
   $$('[data-toggle]', view).forEach((b) => (b.onclick = () => {
     if (stateSel) return; // a single selected state always stays open
@@ -396,50 +442,33 @@ async function renderPipeline() {
   $$('[data-row]', view).forEach((b) => (b.onclick = () => {
     const id = Number(b.dataset.row); openRows.has(id) ? openRows.delete(id) : openRows.add(id); renderPipeline();
   }));
-  $$('[data-move]', view).forEach((b) => (b.onclick = () => {
-    const p = all.find((x) => String(x.id) === b.dataset.move);
-    if (p && String(p.stage_id) !== b.dataset.stage) stageModal(p, Number(b.dataset.stage), renderPipeline);
-  }));
-}
-
-function stageModal(p, toStageId, after) {
-  const card = openModal(`${modalHead('Move project stage')}
-    <p><b>${esc(p.name)}</b> <span class="muted">(${esc(p.code)})</span></p>
-    <form class="grid">
-      <label>New stage<select name="stage_id">${stageOptions(toStageId || p.stage_id)}</select></label>
-      <label>Note (optional) — why is it moving / what's next?<textarea name="note" placeholder="e.g. Utility approved make-ready design, install crew booked for 3/12"></textarea></label>
-      <div class="modal-foot"><button type="button" class="btn" data-close>Cancel</button><button class="btn primary">Move</button></div>
-    </form>`);
-  $('form', card).addEventListener('submit', async (e) => {
-    e.preventDefault();
-    try { await api('POST', `/api/projects/${p.id}/stage`, formData(e.target)); modalClose = null; closeModal(); toast('Stage updated'); after?.(); } catch (err) { fail(err); }
-  });
+  bindMsEditor(view, () => renderPipeline());
 }
 
 // ---------- projects list ----------
 async function renderProjects() {
   const q = qs();
-  const f = { q: q.get('q') || '', phase: q.get('phase') || '', state: q.get('state') || '', stage_id: q.get('stage_id') || '', status: q.get('status') ?? 'open', owner_id: q.get('owner_id') || '', priority: q.get('priority') || '' };
+  const f = { q: q.get('q') || '', phase: q.get('phase') || '', state: q.get('state') || '', progress: q.get('progress') || '', status: q.get('status') ?? 'open', owner_id: q.get('owner_id') || '', priority: q.get('priority') || '' };
   const params = new URLSearchParams(Object.entries(f).filter(([, v]) => v));
   const rows = await api('GET', `/api/projects?${params}`);
   view.innerHTML = `
     <div class="page-head"><h1>Projects <span class="muted small">${rows.length}</span></h1>
-      <div class="actions"><a class="btn" href="/api/projects.csv">Export CSV</a><button class="btn primary" id="newProject">+ New project</button></div></div>
+      <div class="actions"><a class="btn" href="/api/projects.csv">Export CSV</a><button class="btn primary" id="newProject">+ New property</button></div></div>
     <form class="filters" id="filters">
       <input type="search" name="q" placeholder="Search name, code, customer, city…" value="${esc(f.q)}">
       <select name="phase">${options([['diligence', 'Due diligence'], ['pipeline', 'Pipeline']], f.phase, { blank: 'Diligence + pipeline' })}</select>
+      <select name="progress">${options([['incomplete', 'Still in progress'], ['complete', 'Live (all done)'], ['overdue', 'Running late']], f.progress, { blank: 'Any progress' })}</select>
       <select name="state">${options(US_STATES.map(([c, n]) => [c, `${c} · ${n}`]), f.state, { blank: 'All states' })}</select>
-      <select name="stage_id">${options(S.meta.stages.map((s) => [s.id, s.name]), f.stage_id, { blank: 'All stages' })}</select>
       <select name="status">${options([['open', 'Open'], ...S.meta.enums.projectStatus.map((s) => [s, label(s)])], f.status, { blank: 'All statuses' })}</select>
       <select name="owner_id">${options(S.meta.users.map((u) => [u.id, u.name]), f.owner_id, { blank: 'All owners' })}</select>
       <select name="priority">${options(S.meta.enums.priority, f.priority, { blank: 'Any priority' })}</select>
     </form>
-    <div class="table-wrap"><table><thead><tr><th>Project</th><th>Customer</th><th>Stage</th><th>In stage</th><th>Status</th><th>Ports</th><th>Value</th><th>Owner</th><th>Tickets</th><th>Target live</th></tr></thead>
+    <div class="table-wrap"><table><thead><tr><th>Project</th><th>Customer</th><th>Milestones</th><th>Progress</th><th>Status</th><th>Ports</th><th>Value</th><th>Owner</th><th>Tickets</th><th>Target live</th></tr></thead>
     <tbody>${rows.map((p) => `<tr class="clickable" data-href="#/projects/${p.id}">
       <td><b>${esc(p.name)}</b><div class="muted small">${esc(p.code)}${p.city ? ` · ${esc(p.city)}${p.state ? ', ' + esc(p.state) : ''}` : ''}</div></td>
       <td>${esc(p.customer_name || '—')}</td>
-      <td>${p.phase === 'diligence' ? phaseBadge() : stageBadge(p.stage_name, p.stage_color)}</td>
-      <td class="${p.phase !== 'diligence' && isStale(p) ? 'stale' : ''}">${p.days_in_stage}d</td>
+      <td>${p.phase === 'diligence' ? '<span class="muted small">—</span>' : msStrip(p, { names: false })}</td>
+      <td>${progressBadge(p)}</td>
       <td>${statusBadge(p.status)}</td>
       <td>${p.charger_count ? `${p.charger_count} <span class="muted small">${esc(p.charger_type || '')}</span>` : '—'}</td>
       <td>${money(p.estimated_value)}</td>
@@ -459,7 +488,7 @@ async function renderProjects() {
 function projectForm(p = null, { phase = 'diligence' } = {}) {
   const e = S.meta.enums; const v = p || { status: 'active', priority: 'medium', owner_id: S.me.id };
   const isDD = p ? p.phase === 'diligence' : phase === 'diligence';
-  const startOpts = [['dd', 'Due diligence (recommended)'], ...S.meta.stages.map((s) => [s.id, `Pipeline: ${s.name}`])];
+  const startOpts = [['dd', 'Due diligence (recommended)'], ['pipeline', 'Pipeline (skip due diligence)']];
   const ddSection = `<h3 class="full" style="margin:6px 0 0">Due diligence <span class="muted small" style="font-weight:500">— owner, rebate and utility are needed before moving to the pipeline</span></h3>
       <label>Property owner${isDD ? ' *' : ''}<input name="property_owner" value="${esc(v.property_owner)}" placeholder="Who owns the property"></label>
       <label>Owner contact<input name="property_owner_contact" value="${esc(v.property_owner_contact)}" placeholder="Phone or email"></label>
@@ -470,7 +499,7 @@ function projectForm(p = null, { phase = 'diligence' } = {}) {
   const card = openModal(`${modalHead(p ? `Edit ${esc(p.code)}` : isDD ? 'New property' : 'New project')}
     <form class="form-grid">
       <label class="full">Project / site name *<input name="name" required value="${esc(v.name)}" placeholder="e.g. Riverside Plaza – Level 2 garage"></label>
-      ${p ? '' : `<label>Start in<select name="start">${options(startOpts, isDD ? 'dd' : S.meta.stages[0]?.id)}</select></label>`}
+      ${p ? '' : `<label>Start in<select name="start">${options(startOpts, isDD ? 'dd' : 'pipeline')}</select></label>`}
       <label>Status<select name="status">${options(e.projectStatus, v.status)}</select></label>
       <label>Priority<select name="priority">${options(e.priority, v.priority)}</select></label>
       <label>Owner<select name="owner_id">${userOptions(v.owner_id)}</select></label>
@@ -501,7 +530,7 @@ function projectForm(p = null, { phase = 'diligence' } = {}) {
     ev.preventDefault();
     try {
       const data = formData(ev.target);
-      if (!p) { if (data.start === 'dd') data.phase = 'diligence'; else { data.phase = 'pipeline'; data.stage_id = data.start; } delete data.start; }
+      if (!p) { data.phase = data.start === 'dd' ? 'diligence' : 'pipeline'; delete data.start; }
       const saved = p ? await api('PATCH', `/api/projects/${p.id}`, data) : await api('POST', '/api/projects', data);
       modalClose = null; closeModal(); toast(p ? 'Project saved' : saved.phase === 'diligence' ? `Added ${saved.code} to due diligence` : `Created ${saved.code}`);
       if (p) route(); else location.hash = `#/projects/${saved.id}`;
@@ -513,7 +542,6 @@ function projectForm(p = null, { phase = 'diligence' } = {}) {
 let projectTab = 'tickets';
 async function renderProject(id) {
   const p = await api('GET', `/api/projects/${id}`);
-  const cur = S.meta.stages.findIndex((s) => s.id === p.stage_id);
   const dd = p.phase === 'diligence';
   const missing = ddMissing(p);
   $$('[data-nav]').forEach((a) => a.classList.toggle('active', a.dataset.nav === (dd ? 'diligence' : 'projects')));
@@ -521,24 +549,23 @@ async function renderProject(id) {
     <div class="page-head">
       <div><div class="muted small">${dd ? '<a href="#/diligence">Due Diligence</a>' : '<a href="#/projects">Projects</a>'} / ${esc(p.code)}</div>
         <h1>${esc(p.name)}</h1>
-        <div style="display:flex;gap:6px;margin-top:6px;flex-wrap:wrap;align-items:center">${dd ? phaseBadge() : stageBadge(p.stage_name, p.stage_color)} ${statusBadge(p.status)} ${prioBadge(p.priority)}
+        <div style="display:flex;gap:6px;margin-top:6px;flex-wrap:wrap;align-items:center">${progressBadge(p)} ${statusBadge(p.status)} ${prioBadge(p.priority)}
           ${p.state ? badge('', stateName(p.state)) : ''}
-          ${dd ? `<span class="small muted">${p.days_in_stage} days in due diligence</span>`
-            : `<span class="small ${isStale(p) ? 'stale' : 'muted'}">${p.days_in_stage} days in stage${isStale(p) ? ` (SLA ${p.stale_days}d)` : ''}</span>`}</div>
+          ${dd ? `<span class="small muted">${p.days_in_phase} days in due diligence</span>`
+            : `<span class="small ${isFlagged(p) ? 'stale' : 'muted'}">${p.days_in_phase} days in pipeline${isFlagged(p) ? ` · ${p.ms_overdue} milestone${p.ms_overdue === 1 ? '' : 's'} running late` : ''}</span>`}</div>
         ${p.hold_reason && p.status !== 'active' ? `<div class="small" style="margin-top:6px;color:var(--warn)"><b>Hold reason:</b> ${esc(p.hold_reason)}</div>` : ''}
       </div>
       <div class="actions">
         <select id="quickStatus" title="Status">${options(S.meta.enums.projectStatus, p.status)}</select>
-        ${dd ? `<button class="btn ${missing.length ? '' : 'primary'}" id="promote">Move to pipeline →</button>` : '<button class="btn" id="moveStage">Move stage</button>'}
+        ${dd ? `<button class="btn ${missing.length ? '' : 'primary'}" id="promote">Move to pipeline →</button>` : ''}
         <button class="btn" id="editProject">Edit</button>
         ${S.me.role === 'admin' ? '<button class="btn danger" id="delProject">Delete</button>' : ''}
       </div>
     </div>
     ${dd ? `<div class="card dd-card"><h2 style="margin-bottom:8px">Due diligence checklist</h2>
       <div class="checks big">${DD_CHECKS.map(([k, t]) => `<span class="chk ${String(p[k] ?? '').trim() ? 'ok' : ''}">${String(p[k] ?? '').trim() ? '✓' : '○'} ${esc(t)}${String(p[k] ?? '').trim() ? `: <b>${esc(p[k])}</b>` : ''}</span>`).join('')}</div>
-      <div class="small muted" style="margin-top:8px">${missing.length ? `Still needed: ${missing.map(([, t]) => esc(t)).join(', ')}. Click <b>Edit</b> to fill them in.` : 'All checks done. Click <b>Move to pipeline</b> and pick the stage it should start in.'}</div></div>`
-    : `<div class="card" style="padding:10px 12px"><div class="stepper">${S.meta.stages.map((s, i) =>
-      `<button class="step ${i < cur ? 'done' : i === cur ? 'current' : ''}" data-stage="${s.id}" title="Move to ${esc(s.name)}">${esc(s.name)}</button>`).join('')}</div></div>`}
+      <div class="small muted" style="margin-top:8px">${missing.length ? `Still needed: ${missing.map(([, t]) => esc(t)).join(', ')}. Click <b>Edit</b> to fill them in.` : 'All checks done. Click <b>Move to pipeline</b> to start tracking milestones.'}</div></div>`
+    : `<div class="card"><h2 style="margin-bottom:4px">Milestones <span class="muted small">— ${p.ms_complete ? 'all done, this site is live 🎉' : `${p.ms_done} of ${p.ms_total} done · finish them in any order`}</span></h2>${msEditor(p)}</div>`}
     <div class="cols-main" style="margin-top:16px">
       <div>
         <div class="tabs" style="margin-top:0">${['tickets', 'documents', 'timeline', 'activity'].map((t) => `<button class="tab ${projectTab === t ? 'active' : ''}" data-tab="${t}">${label(t)}${t === 'tickets' && p.open_tickets ? ` (${p.open_tickets})` : ''}${t === 'documents' && p.doc_count ? ` (${p.doc_count})` : ''}</button>`).join('')}</div>
@@ -573,9 +600,8 @@ async function renderProject(id) {
     </div>`;
 
   $('#editProject').onclick = () => projectForm(p);
-  $('#moveStage')?.addEventListener('click', () => stageModal(p, null, route));
   $('#promote')?.addEventListener('click', () => promoteModal(p, route));
-  $$('.step', view).forEach((b) => (b.onclick = () => { if (Number(b.dataset.stage) !== p.stage_id) stageModal(p, Number(b.dataset.stage), route); }));
+  bindMsEditor(view, () => route());
   $('#quickStatus').onchange = async (e) => {
     const status = e.target.value; let hold_reason;
     if (['on_hold', 'blocked', 'lost', 'cancelled'].includes(status)) {
@@ -754,17 +780,14 @@ async function tabDocuments(p) {
 }
 
 function tabTimeline(p) {
-  const h = p.history;
-  const items = h.map((x, i) => {
-    const end = h[i + 1]?.changed_at;
-    const days = Math.max(0, Math.round(((end ? toDate(end) : new Date()) - toDate(x.changed_at)) / 86400000));
-    return `<li><span class="dot" style="background:${esc(x.to_color || '#94a3b8')}"></span><div>
-      <b>${esc(x.to_name || '(deleted stage)')}</b> <span class="muted small">· ${days} day${days === 1 ? '' : 's'}${end ? '' : ' so far'}</span>
-      <div class="muted small">${fdatetime(x.changed_at)} by ${esc(x.user_name || '—')}${x.from_name ? ` · from ${esc(x.from_name)}` : ''}</div>
-      ${x.note ? `<div class="note small" style="white-space:pre-wrap;background:#f8fafc;border-radius:8px;padding:6px 8px;margin-top:4px">${esc(x.note)}</div>` : ''}</div></li>`;
-  }).reverse();
+  const h = p.history || [];
+  const items = h.map((x) => `<li><span class="dot" style="background:${esc(x.color || '#94a3b8')}"></span><div>
+      <b>${esc(x.milestone || '(removed milestone)')}</b> <span class="ms ms-${esc(x.to_status)}">${MS_ICON[x.to_status] || ''} ${esc(MS_LABEL[x.to_status] || x.to_status)}</span>
+      <div class="muted small">${fdatetime(x.changed_at)} by ${esc(x.user_name || '—')}${x.from_status && x.from_status !== x.to_status ? ` · was ${esc((MS_LABEL[x.from_status] || x.from_status).toLowerCase())}` : ''}</div>
+      ${x.note ? `<div class="note small" style="white-space:pre-wrap;background:#f8fafc;border-radius:8px;padding:6px 8px;margin-top:4px">${esc(x.note)}</div>` : ''}</div></li>`);
   const total = Math.round((Date.now() - toDate(p.created_at)) / 86400000);
-  $('#tabBody').innerHTML = `<div class="card"><h2>Stage timeline <span class="muted small">— ${total} days since created</span></h2><ul class="timeline">${items.join('')}</ul></div>`;
+  $('#tabBody').innerHTML = `<div class="card"><h2>Milestone history <span class="muted small">— ${total} days since created</span></h2>
+    ${items.length ? `<ul class="timeline">${items.join('')}</ul>` : '<div class="empty">No milestone changes yet.</div>'}</div>`;
 }
 
 async function tabActivity(p) {
@@ -807,7 +830,7 @@ async function renderTickets() {
 // ---------- admin ----------
 async function renderAdmin() {
   const users = await api('GET', '/api/users');
-  const stages = S.meta.stages.map((s) => ({ ...s }));
+  const list = S.meta.milestones.map((m) => ({ ...m }));
   view.innerHTML = `
     <div class="page-head"><h1>Admin</h1></div>
     <div class="cols-2">
@@ -818,31 +841,34 @@ async function renderAdmin() {
           <td>${u.active ? badge('s-active', 'Active') : badge('s-cancelled', 'Disabled')}</td>
           <td style="text-align:right"><button class="btn sm" data-edituser="${u.id}">Edit</button></td></tr>`).join('')}
         </tbody></table></div></div>
-      <div class="card"><h2>Funnel stages</h2>
-        <p class="muted small">Order = funnel order. <b>SLA days</b> flags projects holding too long in a stage. Mark the final stage(s) as “closed / live”.</p>
-        <div id="stageList" class="grid" style="gap:6px"></div>
-        <div style="display:flex;justify-content:space-between;margin-top:12px"><button class="btn sm" id="addStage">+ Add stage</button><button class="btn primary sm" id="saveStages">Save funnel</button></div>
+      <div class="card"><h2>Milestones</h2>
+        <p class="muted small">Every project tracks each of these, in any order, and can mark any of them “not needed”. The order is just how they're displayed.
+          <b>Target days</b> is how long a milestone can be in progress before it's flagged as running late.</p>
+        <div class="ms-admin-head small muted"><span>Colour</span><span>Name</span><span>Target days</span><span></span><span></span></div>
+        <div id="msList" class="grid" style="gap:6px"></div>
+        <div style="display:flex;justify-content:space-between;margin-top:12px"><button class="btn sm" id="addMs">+ Add milestone</button><button class="btn primary sm" id="saveMs">Save milestones</button></div>
       </div>
     </div>`;
-  const drawStages = () => {
-    $('#stageList').innerHTML = stages.map((s, i) => `<div style="display:grid;grid-template-columns:36px 1fr 74px 40px auto auto;gap:6px;align-items:center" data-i="${i}">
-      <input type="color" value="${esc(s.color)}" data-k="color" style="padding:2px;height:34px">
-      <input value="${esc(s.name)}" data-k="name" placeholder="Stage name">
-      <input type="number" min="1" value="${esc(s.stale_days)}" data-k="stale_days" title="SLA days before flagged">
-      <input type="checkbox" ${s.is_closed ? 'checked' : ''} data-k="is_closed" title="Closed / live stage" style="width:18px">
+  const draw = () => {
+    $('#msList').innerHTML = list.map((m, i) => `<div class="ms-admin-row" data-i="${i}">
+      <input type="color" value="${esc(m.color)}" data-k="color" style="padding:2px;height:34px" aria-label="Colour">
+      <input value="${esc(m.name)}" data-k="name" placeholder="Milestone name" aria-label="Name">
+      <input type="number" min="1" value="${esc(m.sla_days)}" data-k="sla_days" aria-label="Target days">
       <span style="display:flex;gap:2px"><button class="btn sm" data-mv="-1" title="Move up">↑</button><button class="btn sm" data-mv="1" title="Move down">↓</button></span>
       <button class="btn sm danger" data-rm title="Remove">✕</button></div>`).join('');
-    $$('#stageList [data-i]').forEach((row) => {
+    $$('#msList [data-i]').forEach((row) => {
       const i = Number(row.dataset.i);
-      $$('[data-k]', row).forEach((inp) => inp.addEventListener('input', () => { stages[i][inp.dataset.k] = inp.type === 'checkbox' ? inp.checked : inp.value; }));
-      $$('[data-mv]', row).forEach((b) => (b.onclick = () => { const j = i + Number(b.dataset.mv); if (j < 0 || j >= stages.length) return; [stages[i], stages[j]] = [stages[j], stages[i]]; drawStages(); }));
-      $('[data-rm]', row).onclick = () => { stages.splice(i, 1); drawStages(); };
+      $$('[data-k]', row).forEach((inp) => inp.addEventListener('input', () => { list[i][inp.dataset.k] = inp.value; }));
+      $$('[data-mv]', row).forEach((b) => (b.onclick = () => { const j = i + Number(b.dataset.mv); if (j < 0 || j >= list.length) return; [list[i], list[j]] = [list[j], list[i]]; draw(); }));
+      $('[data-rm]', row).onclick = () => { list.splice(i, 1); draw(); };
     });
   };
-  drawStages();
-  $('#addStage').onclick = () => { stages.push({ name: '', color: '#64748b', stale_days: 14, is_closed: 0 }); drawStages(); };
-  $('#saveStages').onclick = async () => {
-    try { await api('PUT', '/api/stages', stages); await loadMeta(); toast('Funnel saved'); renderAdmin(); } catch (err) { fail(err); }
+  draw();
+  $('#addMs').onclick = () => { list.push({ name: '', color: '#64748b', sla_days: 30 }); draw(); };
+  $('#saveMs').onclick = async () => {
+    const removed = S.meta.milestones.filter((m) => !list.some((x) => x.id === m.id));
+    if (removed.length && !confirm(`Remove ${removed.map((m) => `"${m.name}"`).join(', ')} from every project? Its status on each project will be lost.`)) return;
+    try { await api('PUT', '/api/milestones', list); await loadMeta(); toast('Milestones saved'); renderAdmin(); } catch (err) { fail(err); }
   };
   $('#addUser').onclick = () => userForm();
   $$('[data-edituser]').forEach((b) => (b.onclick = () => userForm(users.find((u) => String(u.id) === b.dataset.edituser))));

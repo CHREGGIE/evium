@@ -181,6 +181,77 @@ if (db.prepare('SELECT COUNT(*) c FROM stages').get().c === 0) {
   db.transaction(() => DEFAULT_STAGES.forEach((s, i) => ins.run(s[0], i + 1, s[1], s[2], s[3])))();
 }
 
+// ---------- milestones ----------
+// Projects don't follow one fixed flow. Each project tracks every milestone on its own
+// (not started / in progress / done / not needed), and they can finish in any order.
+db.exec(`
+CREATE TABLE IF NOT EXISTS milestones (
+  id INTEGER PRIMARY KEY,
+  name TEXT NOT NULL,
+  position INTEGER NOT NULL,
+  color TEXT NOT NULL DEFAULT '#64748b',
+  sla_days INTEGER NOT NULL DEFAULT 30
+);
+CREATE TABLE IF NOT EXISTS project_milestones (
+  project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  milestone_id INTEGER NOT NULL REFERENCES milestones(id) ON DELETE CASCADE,
+  status TEXT NOT NULL DEFAULT 'not_started' CHECK (status IN ('not_started','in_progress','done','not_needed')),
+  started_at TEXT,
+  completed_at TEXT,
+  updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+  PRIMARY KEY (project_id, milestone_id)
+);
+CREATE TABLE IF NOT EXISTS milestone_history (
+  id INTEGER PRIMARY KEY,
+  project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  milestone_id INTEGER REFERENCES milestones(id) ON DELETE SET NULL,
+  milestone_name TEXT,
+  from_status TEXT,
+  to_status TEXT NOT NULL,
+  user_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  note TEXT,
+  changed_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_mhist_project ON milestone_history(project_id, changed_at);
+`);
+
+const DEFAULT_MILESTONES = [
+  ['Site walk', '#38bdf8', 14],
+  ['Proposal', '#a78bfa', 14],
+  ['Contract', '#f472b6', 21],
+  ['Permitting', '#f59e0b', 45],
+  ['Approvals', '#eab308', 45],
+  ['Installation', '#22c55e', 30],
+];
+const MS_STATUSES = ['not_started', 'in_progress', 'done', 'not_needed'];
+
+if (db.prepare('SELECT COUNT(*) c FROM milestones').get().c === 0) {
+  const ins = db.prepare('INSERT INTO milestones (name, position, color, sla_days) VALUES (?,?,?,?)');
+  db.transaction(() => DEFAULT_MILESTONES.forEach((m, i) => ins.run(m[0], i + 1, m[1], m[2])))();
+
+  // One-time conversion: turn each pipeline project's old single stage into milestone statuses.
+  // [milestones done, milestone in progress] for each of the original default stage names.
+  const STAGE_MAP = {
+    'Lead': [[], null], 'Qualified': [[], null], 'Site Survey': [[], 'Site walk'],
+    'Proposal Sent': [['Site walk'], 'Proposal'], 'Contract Signed': [['Site walk', 'Proposal', 'Contract'], null],
+    'Design & Engineering': [['Site walk', 'Proposal', 'Contract'], 'Permitting'],
+    'Permitting': [['Site walk', 'Proposal', 'Contract'], 'Permitting'],
+    'Utility / Make-Ready': [['Site walk', 'Proposal', 'Contract', 'Permitting'], 'Approvals'],
+    'Installation': [['Site walk', 'Proposal', 'Contract', 'Permitting', 'Approvals'], 'Installation'],
+    'Commissioning': [['Site walk', 'Proposal', 'Contract', 'Permitting', 'Approvals', 'Installation'], null],
+    'Live / Operational': [['Site walk', 'Proposal', 'Contract', 'Permitting', 'Approvals', 'Installation'], null],
+  };
+  const ms = Object.fromEntries(db.prepare('SELECT id, name FROM milestones').all().map((m) => [m.name, m.id]));
+  const rows = db.prepare(`SELECT p.id, p.stage_entered_at, s.name AS stage FROM projects p JOIN stages s ON s.id = p.stage_id
+    WHERE p.phase = 'pipeline'`).all();
+  const insPM = db.prepare('INSERT OR IGNORE INTO project_milestones (project_id, milestone_id, status, started_at, completed_at, updated_at) VALUES (?,?,?,?,?,?)');
+  db.transaction(() => rows.forEach((r) => {
+    const [done, active] = STAGE_MAP[r.stage] || [[], null];
+    done.forEach((n) => insPM.run(r.id, ms[n], 'done', null, r.stage_entered_at, r.stage_entered_at));
+    if (active) insPM.run(r.id, ms[active], 'in_progress', r.stage_entered_at, null, r.stage_entered_at);
+  }))();
+}
+
 function hashPassword(pw) {
   const salt = crypto.randomBytes(16).toString('hex');
   const hash = crypto.scryptSync(pw, salt, 64).toString('hex');
@@ -208,4 +279,4 @@ if (db.prepare('SELECT COUNT(*) c FROM users').get().c === 0) {
   console.log('================================================\n');
 }
 
-module.exports = { db, hashPassword, verifyPassword, DATA_DIR };
+module.exports = { db, hashPassword, verifyPassword, DATA_DIR, MS_STATUSES };

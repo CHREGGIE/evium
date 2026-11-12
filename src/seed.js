@@ -9,8 +9,7 @@ if (!seedPipeline && !seedDiligence) {
   process.exit(0);
 }
 
-const stages = db.prepare('SELECT * FROM stages ORDER BY position').all();
-const st = (name) => stages.find((s) => s.name === name)?.id || stages[0].id;
+const milestones = db.prepare('SELECT * FROM milestones ORDER BY position').all();
 
 const staff = [
   ['Maya Chen', 'maya@eviumcharging.com', 'staff'],
@@ -22,20 +21,25 @@ const userIds = staff.map(([name, email, role]) => {
   return ex ? ex.id : db.prepare('INSERT INTO users (name, email, password_hash, role) VALUES (?,?,?,?)').run(name, email, hashPassword('changeme123'), role).lastInsertRowid;
 });
 
+// Milestone codes, one letter per default milestone in order
+// (Site walk, Proposal, Contract, Permitting, Approvals, Installation):
+//   D = done, I = in progress, N = not needed, - = not started.
+// They deliberately don't all follow the same order — e.g. approvals done before permitting.
+// The last number is how many days the in-progress milestone(s) have been running.
 const projects = [
-  ['Riverside Plaza Garage', 'Riverside Retail LLC', 'Dana Morris', 'dana@riverside.example', '555-0101', '120 River St', 'Austin', 'TX', '78701', 'retail', 'L2', 12, 115, 84000, 'Permitting', 'active', 'high', 41],
-  ['Harbor Logistics Fleet Depot', 'Harbor Logistics', 'Luis Ortega', 'luis@harbor.example', '555-0102', '9 Dock Rd', 'Houston', 'TX', '77002', 'fleet', 'DCFC', 8, 1200, 960000, 'Utility / Make-Ready', 'blocked', 'urgent', 63],
-  ['Oakwood Apartments', 'Oakwood Residential', 'Priya Nair', 'priya@oakwood.example', '555-0103', '44 Oak Ave', 'Dallas', 'TX', '75201', 'multifamily', 'L2', 20, 144, 112000, 'Proposal Sent', 'active', 'medium', 9],
-  ['Sunset Hotel & Suites', 'Sunset Hospitality', 'Tom Becker', 'tom@sunset.example', '555-0104', '800 Sunset Blvd', 'San Antonio', 'TX', '78205', 'hospitality', 'L2 + DCFC', 10, 420, 310000, 'Contract Signed', 'active', 'high', 3],
-  ['City Hall Public Lot', 'City of Round Rock', 'Angela Kim', 'akim@roundrock.example', '555-0105', '221 E Main St', 'Round Rock', 'TX', '78664', 'municipal', 'L2', 6, 43, 52000, 'Site Survey', 'on_hold', 'medium', 22],
-  ['QuickFuel Travel Center', 'QuickFuel Inc', 'Ray Dawson', 'ray@quickfuel.example', '555-0106', 'I-35 Exit 250', 'Georgetown', 'TX', '78626', 'fuel_station', 'DCFC', 6, 1800, 1150000, 'Installation', 'active', 'high', 12],
-  ['TechPark Campus B', 'TechPark Holdings', 'Ellen Wu', 'ellen@techpark.example', '555-0107', '5 Innovation Way', 'Austin', 'TX', '78758', 'workplace', 'L2', 30, 216, 165000, 'Commissioning', 'active', 'medium', 4],
-  ['Lakeside Medical Center', 'Lakeside Health', 'Dr. Omar Haddad', 'ohaddad@lakeside.example', '555-0108', '300 Lake Dr', 'Austin', 'TX', '78746', 'workplace', 'L2', 16, 115, 98000, 'Live / Operational', 'won', 'low', 30],
-  ['Midtown Parking Structure', 'Midtown Parking Co', 'Kevin Lee', 'kevin@midtown.example', '555-0109', '77 5th St', 'Houston', 'TX', '77003', 'parking', 'L2', 24, 173, 140000, 'Lead', 'active', 'medium', 2],
-  ['Greenway Grocers #14', 'Greenway Grocers', 'Sofia Alvarez', 'sofia@greenway.example', '555-0110', '1400 Greenway Pkwy', 'Plano', 'TX', '75024', 'retail', 'DCFC', 4, 600, 420000, 'Qualified', 'active', 'high', 15],
-  ['Westfield Office Park', 'Westfield REIT', 'Brian Cole', 'bcole@westfield.example', '555-0111', '2 Westfield Ct', 'Frisco', 'TX', '75034', 'workplace', 'L2', 14, 101, 76000, 'Design & Engineering', 'active', 'medium', 26],
-  ['Bayview Transit Hub', 'Bayview Transit Authority', 'Grace Park', 'gpark@bayview.example', '555-0112', '1 Harbor Dr', 'San Diego', 'CA', '92101', 'municipal', 'DCFC', 10, 1500, 1020000, 'Permitting', 'active', 'high', 18],
-  ['Palm Grove Shopping Center', 'Palm Grove Retail', 'Marco Silva', 'msilva@palmgrove.example', '555-0113', '5500 Palm Ave', 'Orlando', 'FL', '32801', 'retail', 'L2 + DCFC', 12, 480, 365000, 'Proposal Sent', 'active', 'medium', 6],
+  ['Riverside Plaza Garage', 'Riverside Retail LLC', 'Dana Morris', 'dana@riverside.example', '555-0101', '120 River St', 'Austin', 'TX', '78701', 'retail', 'L2', 12, 115, 84000, 'DDDID-', 'active', 'high', 41],
+  ['Harbor Logistics Fleet Depot', 'Harbor Logistics', 'Luis Ortega', 'luis@harbor.example', '555-0102', '9 Dock Rd', 'Houston', 'TX', '77002', 'fleet', 'DCFC', 8, 1200, 960000, 'DDDDI-', 'blocked', 'urgent', 63],
+  ['Oakwood Apartments', 'Oakwood Residential', 'Priya Nair', 'priya@oakwood.example', '555-0103', '44 Oak Ave', 'Dallas', 'TX', '75201', 'multifamily', 'L2', 20, 144, 112000, 'DI-I--', 'active', 'medium', 9],
+  ['Sunset Hotel & Suites', 'Sunset Hospitality', 'Tom Becker', 'tom@sunset.example', '555-0104', '800 Sunset Blvd', 'San Antonio', 'TX', '78205', 'hospitality', 'L2 + DCFC', 10, 420, 310000, 'DDD---', 'active', 'high', 3],
+  ['City Hall Public Lot', 'City of Round Rock', 'Angela Kim', 'akim@roundrock.example', '555-0105', '221 E Main St', 'Round Rock', 'TX', '78664', 'municipal', 'L2', 6, 43, 52000, 'I---N-', 'on_hold', 'medium', 22],
+  ['QuickFuel Travel Center', 'QuickFuel Inc', 'Ray Dawson', 'ray@quickfuel.example', '555-0106', 'I-35 Exit 250', 'Georgetown', 'TX', '78626', 'fuel_station', 'DCFC', 6, 1800, 1150000, 'DDDDDI', 'active', 'high', 12],
+  ['TechPark Campus B', 'TechPark Holdings', 'Ellen Wu', 'ellen@techpark.example', '555-0107', '5 Innovation Way', 'Austin', 'TX', '78758', 'workplace', 'L2', 30, 216, 165000, 'DDDNDD', 'active', 'medium', 4],
+  ['Lakeside Medical Center', 'Lakeside Health', 'Dr. Omar Haddad', 'ohaddad@lakeside.example', '555-0108', '300 Lake Dr', 'Austin', 'TX', '78746', 'workplace', 'L2', 16, 115, 98000, 'DDDDDD', 'won', 'low', 30],
+  ['Midtown Parking Structure', 'Midtown Parking Co', 'Kevin Lee', 'kevin@midtown.example', '555-0109', '77 5th St', 'Houston', 'TX', '77003', 'parking', 'L2', 24, 173, 140000, 'I-----', 'active', 'medium', 2],
+  ['Greenway Grocers #14', 'Greenway Grocers', 'Sofia Alvarez', 'sofia@greenway.example', '555-0110', '1400 Greenway Pkwy', 'Plano', 'TX', '75024', 'retail', 'DCFC', 4, 600, 420000, 'DIIN--', 'active', 'high', 15],
+  ['Westfield Office Park', 'Westfield REIT', 'Brian Cole', 'bcole@westfield.example', '555-0111', '2 Westfield Ct', 'Frisco', 'TX', '75034', 'workplace', 'L2', 14, 101, 76000, 'DDD-I-', 'active', 'medium', 26],
+  ['Bayview Transit Hub', 'Bayview Transit Authority', 'Grace Park', 'gpark@bayview.example', '555-0112', '1 Harbor Dr', 'San Diego', 'CA', '92101', 'municipal', 'DCFC', 10, 1500, 1020000, 'DDIIN-', 'active', 'high', 18],
+  ['Palm Grove Shopping Center', 'Palm Grove Retail', 'Marco Silva', 'msilva@palmgrove.example', '555-0113', '5500 Palm Ave', 'Orlando', 'FL', '32801', 'retail', 'L2 + DCFC', 12, 480, 365000, 'DI----', 'active', 'medium', 6],
 ];
 
 // Properties still in due diligence: [name, address, city, state, zip, site type, property owner, owner contact, rebate, rebate $, utility, days ago]
@@ -47,31 +51,43 @@ const diligence = [
 ];
 
 const insP = db.prepare(`INSERT INTO projects (name, customer_name, contact_name, contact_email, contact_phone, address, city, state, zip, site_type,
-  charger_type, charger_count, power_kw, estimated_value, stage_id, status, priority, owner_id, stage_entered_at, created_at, hold_reason, target_live_date)
-  VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?, datetime('now', ?), datetime('now', ?), ?, date('now', ?))`);
-const insH = db.prepare('INSERT INTO stage_history (project_id, from_stage_id, to_stage_id, user_id, note, changed_at) VALUES (?,?,?,?,?, datetime(\'now\', ?))');
+  charger_type, charger_count, power_kw, estimated_value, phase, status, priority, owner_id, stage_entered_at, created_at, hold_reason, target_live_date)
+  VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?, 'pipeline', ?,?,?, datetime('now', ?), datetime('now', ?), ?, date('now', ?))`);
+const insM = db.prepare(`INSERT INTO project_milestones (project_id, milestone_id, status, started_at, completed_at, updated_at)
+  VALUES (?,?,?, datetime('now', ?), datetime('now', ?), datetime('now', ?))`);
+const insMH = db.prepare(`INSERT INTO milestone_history (project_id, milestone_id, milestone_name, from_status, to_status, user_id, changed_at)
+  VALUES (?,?,?,?,?,?, datetime('now', ?))`);
 const insT = db.prepare('INSERT INTO tickets (project_id, title, type, priority, status, assignee_id, due_date, created_by, description) VALUES (?,?,?,?,?,?, date(\'now\', ?),?,?)');
 const insA = db.prepare('INSERT INTO activity (project_id, user_id, action, detail) VALUES (?,?,?,?)');
+const CODE = { D: 'done', I: 'in_progress', N: 'not_needed' };
 
 if (seedPipeline) db.transaction(() => {
   projects.forEach((p, i) => {
-    const [name, cust, cn, ce, cp, addr, city, state, zip, site, ctype, count, kw, value, stageName, status, prio, daysIn] = p;
-    const stageId = st(stageName);
+    const [name, cust, cn, ce, cp, addr, city, state, zip, site, ctype, count, kw, value, code, status, prio, daysIn] = p;
     const owner = userIds[i % userIds.length];
-    const pos = stages.findIndex((s) => s.id === stageId);
-    const createdDaysAgo = daysIn + pos * 12;
+    const done = [...code].filter((c) => c === 'D').length;
+    const createdDaysAgo = daysIn + done * 10 + 5;
     const hold = status === 'blocked' ? 'Waiting on utility transformer upgrade – CenterPoint ETA unknown' : status === 'on_hold' ? 'City council budget vote pending' : null;
-    const info = insP.run(name, cust, cn, ce, cp, addr, city, state, zip, site, ctype, count, kw, value, stageId, status, prio, owner,
-      `-${daysIn} days`, `-${createdDaysAgo} days`, hold, `+${(stages.length - pos) * 20} days`);
-    const pid = info.lastInsertRowid;
+    const pid = insP.run(name, cust, cn, ce, cp, addr, city, state, zip, site, ctype, count, kw, value, status, prio, owner,
+      `-${createdDaysAgo} days`, `-${createdDaysAgo} days`, hold, `+${(code.length - done) * 25 + 10} days`).lastInsertRowid;
     db.prepare('UPDATE projects SET code = ? WHERE id = ?').run(`EV-${String(pid).padStart(4, '0')}`, pid);
-    let prev = null;
-    for (let k = 0; k <= pos; k++) {
-      const ago = k === pos ? daysIn : createdDaysAgo - k * 12;
-      insH.run(pid, prev, stages[k].id, owner, k === 0 ? 'Project created' : null, `-${ago} days`);
-      prev = stages[k].id;
-    }
     insA.run(pid, owner, 'project_created', name);
+    let k = 0;
+    [...code].forEach((c, mi) => {
+      const st = CODE[c]; if (!st) return;
+      const m = milestones[mi]; if (!m) return;
+      if (st === 'done') {
+        const startAgo = createdDaysAgo - 3 - k * 8; const endAgo = Math.max(daysIn + 1, startAgo - 7); k++;
+        insM.run(pid, m.id, st, `-${startAgo} days`, `-${endAgo} days`, `-${endAgo} days`);
+        insMH.run(pid, m.id, m.name, 'not_started', 'done', owner, `-${endAgo} days`);
+      } else if (st === 'in_progress') {
+        insM.run(pid, m.id, st, `-${daysIn} days`, null, `-${daysIn} days`);
+        insMH.run(pid, m.id, m.name, 'not_started', 'in_progress', owner, `-${daysIn} days`);
+      } else {
+        insM.run(pid, m.id, st, null, null, `-${createdDaysAgo - 1} days`);
+        insMH.run(pid, m.id, m.name, 'not_started', 'not_needed', owner, `-${createdDaysAgo - 1} days`);
+      }
+    });
   });
 
   const t = [
