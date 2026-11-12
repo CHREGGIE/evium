@@ -396,6 +396,34 @@ addColumns('users', { title: 'TEXT', is_exec: 'INTEGER NOT NULL DEFAULT 0', gran
 // each person's own dashboard layout: {"main": [widget ids], "side": [widget ids]} (empty = default for their job)
 addColumns('users', { dashboard: 'TEXT' });
 
+// ---------- calendar: site walks, installations and other bookings ----------
+// Times are stored as typed, in the site's local time: "YYYY-MM-DDTHH:MM".
+db.exec(`
+CREATE TABLE IF NOT EXISTS events (
+  id INTEGER PRIMARY KEY,
+  project_id INTEGER REFERENCES projects(id) ON DELETE CASCADE,
+  milestone_id INTEGER REFERENCES milestones(id) ON DELETE SET NULL,
+  kind TEXT NOT NULL DEFAULT 'site_walk' CHECK (kind IN ('site_walk','installation','inspection','meeting','other')),
+  title TEXT,
+  starts_at TEXT NOT NULL,
+  ends_at TEXT NOT NULL,
+  location TEXT,
+  notes TEXT,
+  status TEXT NOT NULL DEFAULT 'scheduled' CHECK (status IN ('scheduled','done','cancelled')),
+  created_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_events_time ON events(starts_at);
+CREATE INDEX IF NOT EXISTS idx_events_project ON events(project_id);
+CREATE TABLE IF NOT EXISTS event_people (
+  event_id INTEGER NOT NULL REFERENCES events(id) ON DELETE CASCADE,
+  user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  PRIMARY KEY (event_id, user_id)
+);
+CREATE INDEX IF NOT EXISTS idx_event_people_user ON event_people(user_id);
+`);
+
 // ---------- milestone steps ----------
 // Each milestone has a default checklist of steps (edited in Admin). A project gets its own copy
 // the first time that milestone is opened, so a site can add or remove steps without affecting others.

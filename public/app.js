@@ -168,6 +168,7 @@ async function route() {
     else if (page === 'diligence') await renderDiligence();
     else if (page === 'pipeline') await renderPipeline();
     else if (page === 'map') await renderMap();
+    else if (page === 'calendar') await renderCalendar();
     else if (page === 'team' && canSeeTeam()) { if (id) location.hash = `#/dashboard?as=${id}`; else await renderTeam(); }
     else if (page === 'rebates') await renderRebates();
     else if (page === 'utilities' && id) await renderUtility(id);
@@ -191,7 +192,7 @@ const territoryToggle = (on) => (myStates().length
   ? `<button type="button" class="chip ${on ? 'active' : ''}" id="mineToggle" title="Only show ${esc(myStates().join(', '))}">★ My territory</button>` : '');
 
 // ---------- notifications ----------
-const NOTIF_ICON = { rebate: '$', handoff: '→', site_walk: '→', review: '?', mention: '@', message: '💬', reminder: '⏰', reminder_set: '⏰', territory: '★' };
+const NOTIF_ICON = { calendar: '📅', rebate: '$', handoff: '→', site_walk: '→', review: '?', mention: '@', message: '💬', reminder: '⏰', reminder_set: '⏰', territory: '★' };
 let bellTimer = null;
 async function refreshBell() {
   if (!S.me) return;
@@ -302,6 +303,14 @@ const reminderLine = (r, { showSite }) => {
 function bindReminderLines(root, after) {
   $$('[data-rdone]', root).forEach((b) => (b.onclick = async () => { try { await api('PATCH', `/api/reminders/${b.dataset.rdone}`, { done: true }); toast('Reminder done'); after(); } catch (err) { fail(err); } }));
   $$('[data-rsnooze]', root).forEach((b) => (b.onclick = async () => { try { await api('PATCH', `/api/reminders/${b.dataset.rsnooze}`, { due_on: addDays(7) }); toast('Pushed back a week'); after(); } catch (err) { fail(err); } }));
+}
+async function projectCalendarCard(p, el) {
+  const rows = await api('GET', `/api/events?project_id=${p.id}&from=${today()}T00:00`);
+  el.innerHTML = `<div class="card-head"><h2>Bookings</h2><a class="small" href="#/calendar?who=">Calendar ›</a></div>
+    ${evList(rows, { empty: 'Nothing booked yet.', showSite: false })}
+    <div class="book-btns"><button class="btn sm" data-book="site_walk">Book site walk</button><button class="btn sm" data-book="installation">Book installation</button><button class="btn sm" data-book="inspection">Other…</button></div>`;
+  $$('[data-book]', el).forEach((b) => (b.onclick = () => bookModal({ project: p, kind: b.dataset.book }, () => route())));
+  bindEvents(el, () => route());
 }
 async function projectRemindersCard(p, el) {
   const rows = await api('GET', `/api/projects/${p.id}/reminders`);
@@ -690,6 +699,7 @@ async function renderMap() {
 // ---------- milestone list + milestone pages ----------
 // Each milestone is its own page with a checklist of steps, its own files, discussion and reminders.
 const msHref = (pid, mid) => `#/projects/${pid}/m/${mid}`;
+const msBookKind = (m) => (/site walk/i.test(m.name) ? 'site_walk' : /install/i.test(m.name) ? 'installation' : 'inspection');
 const msStatusPill = (s, overdue) => `<span class="ms-pill ms-pill-${s}${overdue ? ' late' : ''}">${overdue ? 'Running late' : MS_LABEL[s]}</span>`;
 const msMeta = (x) => (x.status === 'done' && x.completed_at ? `Done ${fdate(x.completed_at)}`
   : x.status === 'in_progress' ? `${x.days_open ?? 0} days in progress${x.overdue ? ` (target ${x.sla_days})` : ''}`
@@ -768,6 +778,8 @@ async function renderMilestone(pid, mid) {
       </div>
       <div class="grid" style="gap:16px">
         <section class="card"><h2>Discussion</h2><p class="muted small" style="margin-top:-6px">Also shows in the site's main chat.</p><div id="msChat"></div></section>
+        <section class="card"><div class="card-head"><h2>Bookings</h2><button class="btn sm" id="msBook">Book ${esc(msBookKind(m) === 'installation' ? 'installation' : msBookKind(m) === 'site_walk' ? 'site walk' : 'a visit')}</button></div>
+          <div id="msEvents"><div class="work-empty">Loading…</div></div></section>
         <section class="card"><div class="card-head"><h2>Reminders</h2><button class="btn sm" id="msRemind">Add</button></div>
           <div class="rem-list">${d.reminders.map((r) => reminderLine(r, { showSite: false })).join('') || '<div class="muted small">No follow-ups set.</div>'}</div></section>
       </div>
@@ -806,8 +818,210 @@ async function renderMilestone(pid, mid) {
   };
   bindDocActions($('#msDocs'), again);
   $('#msRemind').onclick = () => reminderModal(p, m.id, again);
+  $('#msBook').onclick = () => bookModal({ project: p, kind: msBookKind(m) }, again);
+  api('GET', `/api/events?project_id=${p.id}&milestone_id=${m.id}&include_cancelled=1`).then((rows) => {
+    const el = $('#msEvents'); if (!el) return;
+    el.innerHTML = evList(rows, { empty: 'Nothing booked for this milestone.', showSite: false }); bindEvents(el, again);
+  }).catch(() => {});
   bindReminderLines(view, again);
   mountChat($('#msChat'), p, m.id).catch(() => {});
+}
+
+// ---------- calendar: book site walks, installations and more ----------
+const EVENT_KIND = { site_walk: 'Site walk', installation: 'Installation', inspection: 'Inspection', meeting: 'Meeting', other: 'Other' };
+const EVENT_COLOR = { site_walk: '#0ea5e9', installation: '#16a34a', inspection: '#d97706', meeting: '#8b5cf6', other: '#64748b' };
+const pad2 = (n) => String(n).padStart(2, '0');
+const ymd = (d) => `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`;
+const parseYmd = (s) => { const [y, m, d] = s.split('-').map(Number); return new Date(y, m - 1, d); };
+const addDaysTo = (d, n) => { const x = new Date(d); x.setDate(x.getDate() + n); return x; };
+const hhmm = (t) => { const [h, m] = t.split(':').map(Number); return `${((h + 11) % 12) + 1}${m ? `:${pad2(m)}` : ''}${h < 12 ? 'am' : 'pm'}`; };
+const evTime = (e) => { const [d1, t1] = e.starts_at.split('T'); const [d2, t2] = e.ends_at.split('T'); return d1 === d2 ? `${hhmm(t1)}–${hhmm(t2)}` : `${fdate(d1)} ${hhmm(t1)} – ${fdate(d2)} ${hhmm(t2)}`; };
+const evTitle = (e) => e.title || `${EVENT_KIND[e.kind]}${e.project_name ? `: ${e.project_name}` : ''}`;
+const evChip = (e, { showDate = false } = {}) => `<button type="button" class="ev ${e.status !== 'scheduled' ? `is-${e.status}` : ''}" data-ev="${e.id}" style="--ev:${EVENT_COLOR[e.kind]}" title="${esc(evTitle(e))} · ${esc(evTime(e))}">
+    <span class="ev-time">${showDate ? `${fdate(e.starts_at.slice(0, 10))} · ` : ''}${hhmm(e.starts_at.slice(11))}</span><span class="ev-name">${esc(e.project_name || e.title || EVENT_KIND[e.kind])}</span></button>`;
+// a list of bookings (used on a site, a milestone and the dashboard)
+const evList = (rows, { empty = 'Nothing booked.', showSite = true } = {}) => (rows.length ? `<div class="ev-list">${rows.map((e) => `<button type="button" class="ev-row" data-ev="${e.id}">
+    <span class="ev-bar" style="background:${EVENT_COLOR[e.kind]}"></span>
+    <span class="ev-when"><b>${esc(fdate(e.starts_at.slice(0, 10)))}</b><span class="muted small">${esc(evTime(e))}</span></span>
+    <span class="ev-what"><b>${esc(EVENT_KIND[e.kind])}</b>${showSite && e.project_name ? ` · ${esc(e.address || e.project_name)}` : ''}<span class="muted small">${esc(e.people.map((x) => x.name).join(', ') || 'Nobody assigned')}</span></span>
+  </button>`).join('')}</div>` : `<div class="work-empty">${esc(empty)}</div>`);
+const bindEvents = (root, after) => $$('[data-ev]', root).forEach((b) => (b.onclick = (e) => { e.stopPropagation(); eventModal(Number(b.dataset.ev), after); }));
+
+let calState = null; // { view: 'month' | 'week', anchor: 'YYYY-MM-DD' }
+async function renderCalendar() {
+  const q = qs();
+  calState ||= { view: 'month', anchor: today() };
+  const who = q.get('who') ?? 'me';
+  const kind = q.get('kind') || '';
+  const anchor = parseYmd(calState.anchor);
+  let start; let days;
+  if (calState.view === 'month') {
+    const first = new Date(anchor.getFullYear(), anchor.getMonth(), 1);
+    start = addDaysTo(first, -first.getDay());
+    const last = new Date(anchor.getFullYear(), anchor.getMonth() + 1, 0);
+    days = Math.ceil((last - start) / 864e5 + 1 + (6 - last.getDay()));
+  } else {
+    start = addDaysTo(anchor, -anchor.getDay()); days = 7;
+  }
+  const end = addDaysTo(start, days);
+  const params = new URLSearchParams({ from: `${ymd(start)}T00:00`, to: `${ymd(end)}T00:00` });
+  if (who) params.set('user_id', who);
+  if (kind) params.set('kind', kind);
+  const rows = await api('GET', `/api/events?${params}`);
+  const onDay = (d) => { const k = ymd(d); return rows.filter((e) => e.starts_at.slice(0, 10) <= k && e.ends_at.slice(0, 10) >= k); };
+  const title = calState.view === 'month' ? anchor.toLocaleDateString('en-US', { month: 'long', year: 'numeric' })
+    : `${fdate(ymd(start))} – ${fdate(ymd(addDaysTo(start, 6)))}`;
+  const people = S.meta.users.filter((u) => u.active).sort((a, b) => titleRank(a.title) - titleRank(b.title) || a.name.localeCompare(b.name));
+  const cells = [...Array(days)].map((_, i) => addDaysTo(start, i));
+  view.innerHTML = `
+    <div class="page-head"><div><h1>Calendar</h1><div class="muted small" style="margin-top:4px">${rows.length} booking${rows.length === 1 ? '' : 's'} · times are in the site's local time</div></div>
+      <div class="actions"><button class="btn primary" id="bookBtn">+ Book</button></div></div>
+    <div class="cal-bar">
+      <div class="cal-nav"><button class="btn sm" id="calToday">Today</button><button class="btn sm" id="calPrev" aria-label="Previous">‹</button><button class="btn sm" id="calNext" aria-label="Next">›</button><b class="cal-title">${esc(title)}</b></div>
+      <div class="cal-filters">
+        <select id="calWho" aria-label="Whose bookings">${options([['me', 'My bookings'], ['', 'Everyone'], ...people.filter((u) => u.id !== S.me.id).map((u) => [u.id, u.name])], who)}</select>
+        <select id="calKind" aria-label="Type">${options(Object.entries(EVENT_KIND), kind, { blank: 'All types' })}</select>
+        <span class="seg cal-view"><button type="button" class="${calState.view === 'month' ? 'on is-done' : ''}" data-view="month">Month</button><button type="button" class="${calState.view === 'week' ? 'on is-done' : ''}" data-view="week">Week</button></span>
+      </div>
+    </div>
+    <div class="cal-legend small muted">${Object.entries(EVENT_KIND).map(([k, t]) => `<span><i style="background:${EVENT_COLOR[k]}"></i>${t}</span>`).join('')}</div>
+    <div class="cal ${calState.view}">
+      ${['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'].map((d) => `<div class="cal-dow">${d}</div>`).join('')}
+      ${cells.map((d) => {
+        const k = ymd(d); const list = onDay(d);
+        const other = calState.view === 'month' && d.getMonth() !== anchor.getMonth();
+        return `<div class="cal-day ${other ? 'other' : ''} ${k === today() ? 'today' : ''}" data-day="${k}">
+          <div class="cal-date">${calState.view === 'week' ? d.toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' }) : d.getDate()}</div>
+          <div class="cal-evs">${list.map((e) => evChip(e)).join('')}</div></div>`;
+      }).join('')}
+    </div>`;
+  const go = () => { const p = new URLSearchParams({ who: $('#calWho').value }); if ($('#calKind').value) p.set('kind', $('#calKind').value); location.hash = `#/calendar?${p}`; };
+  $('#calWho').onchange = go; $('#calKind').onchange = go;
+  const shift = (n) => { const a = parseYmd(calState.anchor); calState.anchor = ymd(calState.view === 'month' ? new Date(a.getFullYear(), a.getMonth() + n, 1) : addDaysTo(a, 7 * n)); renderCalendar(); };
+  $('#calPrev').onclick = () => shift(-1); $('#calNext').onclick = () => shift(1);
+  $('#calToday').onclick = () => { calState.anchor = today(); renderCalendar(); };
+  $$('[data-view]', view).forEach((b) => (b.onclick = () => { calState.view = b.dataset.view; renderCalendar(); }));
+  $('#bookBtn').onclick = () => bookModal({ date: calState.view === 'week' || calState.anchor.slice(0, 7) === today().slice(0, 7) ? today() : calState.anchor }, renderCalendar);
+  $$('.cal-day', view).forEach((c) => (c.onclick = (e) => { if (!e.target.closest('[data-ev]')) bookModal({ date: c.dataset.day }, renderCalendar); }));
+  bindEvents(view, renderCalendar);
+}
+
+// Book a site walk, installation, etc. preset: { project, kind, date }
+async function bookModal(preset = {}, after) {
+  const sites = preset.project ? [preset.project] : (await api('GET', '/api/projects?status=open')).filter((p) => p.dd_stage !== 'passed');
+  const kind = preset.kind || 'site_walk';
+  const defaultTimes = (k) => (k === 'installation' ? ['08:00', '16:00'] : k === 'inspection' ? ['10:00', '11:00'] : ['09:00', '11:00']);
+  const [t1, t2] = defaultTimes(kind);
+  const date = preset.date || today();
+  const people = S.meta.users.filter((u) => u.active).sort((a, b) => titleRank(a.title) - titleRank(b.title) || a.name.localeCompare(b.name));
+  const card = openModal(`${modalHead('Book')}
+    <form class="form-grid">
+      <label>Type<select name="kind">${options(Object.entries(EVENT_KIND), kind)}</select></label>
+      <label class="span2">Site<select name="project_id" ${preset.project ? 'disabled' : ''}>${options(sites.map((p) => [p.id, `${p.address || p.name}${p.city ? `, ${p.city}` : ''}${p.state ? ` ${p.state}` : ''} · ${p.code}`]), preset.project?.id || '', { blank: preset.project ? undefined : 'No site (internal)' })}</select></label>
+      <label>Start date<input type="date" name="start_date" required value="${date}"></label>
+      <label>Start time<input type="time" name="start_time" required value="${t1}"></label>
+      <label>End date<input type="date" name="end_date" required value="${date}"></label>
+      <label>End time<input type="time" name="end_time" required value="${t2}"></label>
+      <fieldset class="checkset full"><legend>Who's going</legend>
+        ${people.map((u) => `<label><input type="checkbox" name="u_${u.id}"> ${esc(u.name)}${u.title ? ` <span class="muted">${esc(u.title)}</span>` : ''}</label>`).join('')}</fieldset>
+      <label class="full">Location<input name="location" placeholder="The site's address is used if left blank"></label>
+      <label class="full">Title (optional)<input name="title" placeholder="e.g. Site walk with the owner"></label>
+      <label class="full">Notes<textarea name="notes" rows="3" placeholder="Gate code, who to meet, what to bring…"></textarea></label>
+      <div class="modal-foot full"><button type="button" class="btn" data-close>Cancel</button><button class="btn primary">Book</button></div>
+    </form>`, { wide: true });
+  const form = $('form', card);
+  // pre-tick whoever handles this site: the milestone's owners for its state, and the site's owner
+  const preTick = () => {
+    const pid = Number($('[name=project_id]', card).value) || preset.project?.id;
+    const p = sites.find((x) => x.id === pid);
+    $$('[name^=u_]', card).forEach((c) => (c.checked = false));
+    if (!p) { const me = $(`[name=u_${S.me.id}]`, card); if (me) me.checked = true; return; }
+    const k = $('[name=kind]', card).value;
+    const m = S.meta.milestones.find((x) => x.name.toLowerCase().includes(k === 'site_walk' ? 'site walk' : 'install'));
+    const ids = new Set([...(m ? ownersOf(m.id, p.state).map((u) => u.id) : []), p.owner_id].filter(Boolean));
+    if (!ids.size) ids.add(S.me.id);
+    ids.forEach((id) => { const c = $(`[name=u_${id}]`, card); if (c) c.checked = true; });
+  };
+  preTick();
+  $('[name=project_id]', card).addEventListener('change', preTick);
+  $('[name=kind]', card).addEventListener('change', (e) => {
+    const [a, b] = defaultTimes(e.target.value); $('[name=start_time]', card).value = a; $('[name=end_time]', card).value = b; preTick();
+  });
+  $('[name=start_date]', card).addEventListener('change', (e) => { if ($('[name=end_date]', card).value < e.target.value) $('[name=end_date]', card).value = e.target.value; });
+  form.addEventListener('submit', async (ev) => {
+    ev.preventDefault();
+    const f = formData(form);
+    const body = {
+      kind: f.kind, project_id: preset.project?.id || f.project_id || null, title: f.title, location: f.location, notes: f.notes,
+      starts_at: `${f.start_date}T${f.start_time}`, ends_at: `${f.end_date}T${f.end_time}`,
+      people: Object.keys(f).filter((k) => k.startsWith('u_')).map((k) => Number(k.slice(2))),
+    };
+    const send = async (force) => {
+      try {
+        await api('POST', '/api/events', { ...body, force });
+        modalClose = null; closeModal(); toast(`${EVENT_KIND[body.kind]} booked`); after?.();
+      } catch (err) {
+        if (err.data?.conflicts && !force) {
+          const lines = err.data.conflicts.map((c) => `• ${c.person}: ${EVENT_KIND[c.kind] || 'Booking'}${c.project_name ? ` at ${c.project_name}` : ''}, ${evTime(c)}`).join('\n');
+          if (confirm(`Double-booked:\n${lines}\n\nBook anyway?`)) send(true);
+        } else fail(err);
+      }
+    };
+    send(false);
+  });
+}
+
+// one booking: details, move, mark done, cancel, add to my calendar
+async function eventModal(id, after) {
+  const e = await api('GET', `/api/events/${id}`).catch(() => null);
+  if (!e) { toast('Booking not found', true); return; }
+  const people = S.meta.users.filter((u) => u.active || e.people.some((x) => x.id === u.id)).sort((a, b) => titleRank(a.title) - titleRank(b.title) || a.name.localeCompare(b.name));
+  const [sd, st] = e.starts_at.split('T'); const [ed, et] = e.ends_at.split('T');
+  const card = openModal(`<div class="modal-head"><div>
+      <h2 style="margin:0"><span class="ms-dot" style="background:${EVENT_COLOR[e.kind]};display:inline-block;margin-right:8px"></span>${esc(evTitle(e))}</h2>
+      <div class="muted small" style="margin-top:4px">${esc(EVENT_KIND[e.kind])} · ${esc(fdate(sd))} · ${esc(evTime(e))}${e.status !== 'scheduled' ? ` · <b>${esc(label(e.status))}</b>` : ''}</div></div>
+      <button class="x" data-close aria-label="Close">×</button></div>
+    ${e.project_id ? `<p style="margin-top:0"><a href="#/projects/${e.project_id}" id="evSite">${esc(e.code)} · ${esc(e.address || e.project_name)}${e.city ? `, ${esc(e.city)}` : ''} ›</a>${e.milestone ? ` <span class="muted small">(${esc(e.milestone)})</span>` : ''}</p>` : ''}
+    <form class="form-grid">
+      <label>Start date<input type="date" name="start_date" value="${sd}" required></label>
+      <label>Start time<input type="time" name="start_time" value="${st}" required></label>
+      <label>End date<input type="date" name="end_date" value="${ed}" required></label>
+      <label>End time<input type="time" name="end_time" value="${et}" required></label>
+      <fieldset class="checkset full"><legend>Who's going</legend>
+        ${people.map((u) => `<label><input type="checkbox" name="u_${u.id}" ${e.people.some((x) => x.id === u.id) ? 'checked' : ''}> ${esc(u.name)}</label>`).join('')}</fieldset>
+      <label class="full">Location<input name="location" value="${esc(e.location)}"></label>
+      <label class="full">Notes<textarea name="notes" rows="3">${esc(e.notes)}</textarea></label>
+      <div class="muted small full">Booked by ${esc(e.created_by_name || '—')} · ${fdate(e.created_at)}</div>
+      <div class="modal-foot full" style="justify-content:space-between;flex-wrap:wrap">
+        <span style="display:flex;gap:8px;flex-wrap:wrap">
+          <a class="btn" href="/api/events/${e.id}/ics">Add to my calendar</a>
+          ${e.status === 'scheduled' ? '<button type="button" class="btn" id="evDone">Mark done</button><button type="button" class="btn danger" id="evCancel">Cancel booking</button>' : '<button type="button" class="btn" id="evRestore">Back to scheduled</button>'}
+        </span>
+        <span style="display:flex;gap:8px"><button type="button" class="btn" data-close>Close</button><button class="btn primary">Save changes</button></span>
+      </div>
+    </form>`, { wide: true, onClose: after });
+  $('#evSite', card)?.addEventListener('click', () => { modalClose = null; closeModal(); });
+  const patch = async (body, msg) => {
+    const send = async (force) => {
+      try { await api('PATCH', `/api/events/${e.id}`, { ...body, force }); closeModal(); toast(msg); }
+      catch (err) {
+        if (err.data?.conflicts && !force) {
+          const lines = err.data.conflicts.map((c) => `• ${c.person}: ${EVENT_KIND[c.kind] || 'Booking'}${c.project_name ? ` at ${c.project_name}` : ''}, ${evTime(c)}`).join('\n');
+          if (confirm(`Double-booked:\n${lines}\n\nSave anyway?`)) send(true);
+        } else fail(err);
+      }
+    };
+    send(false);
+  };
+  $('#evDone', card)?.addEventListener('click', () => patch({ status: 'done' }, 'Marked done'));
+  $('#evCancel', card)?.addEventListener('click', () => { if (confirm('Cancel this booking? Everyone on it is notified.')) patch({ status: 'cancelled' }, 'Booking cancelled'); });
+  $('#evRestore', card)?.addEventListener('click', () => patch({ status: 'scheduled' }, 'Back on the calendar'));
+  $('form', card).addEventListener('submit', (ev) => {
+    ev.preventDefault();
+    const f = formData(ev.target);
+    patch({ starts_at: `${f.start_date}T${f.start_time}`, ends_at: `${f.end_date}T${f.end_time}`, location: f.location, notes: f.notes,
+      people: Object.keys(f).filter((k) => k.startsWith('u_')).map((k) => Number(k.slice(2))) }, 'Booking saved');
+  });
 }
 
 // ---------- team (executives and admins) ----------
@@ -868,8 +1082,9 @@ const WIDGETS = {
   reminders: { title: 'Reminders' },
   tickets: { title: 'Open tickets', link: '#/tickets', linkText: 'All tickets' },
   activity: { title: 'Recent activity' },
+  calendar: { title: 'Coming up', link: '#/calendar', linkText: 'Calendar' },
 };
-const widgetIds = () => ['dd', 'review', 'grants', 'sites', ...S.meta.milestones.map((m) => `ms:${m.id}`), 'kpis', 'ms_chart', 'attention', 'reminders', 'tickets', 'activity'];
+const widgetIds = () => ['dd', 'review', 'grants', 'sites', ...S.meta.milestones.map((m) => `ms:${m.id}`), 'kpis', 'ms_chart', 'attention', 'calendar', 'reminders', 'tickets', 'activity'];
 const widgetName = (id) => (id.startsWith('ms:') ? (msById(id.slice(3))?.name || 'Milestone') : WIDGETS[id]?.title || id);
 // the starting layout for someone who hasn't customized, based on their job
 function defaultLayout(u) {
@@ -881,7 +1096,7 @@ function defaultLayout(u) {
   const lead = u.role === 'admin' || u.is_exec;
   if (lead) main.push('kpis', 'attention', 'ms_chart');
   else main.push('sites');
-  return { main, side: ['reminders', 'tickets', 'activity'] };
+  return { main, side: ['calendar', 'reminders', 'tickets', 'activity'] };
 }
 const validLayout = (l) => {
   const ok = new Set(widgetIds());
@@ -941,6 +1156,7 @@ async function renderDashboard(asId) {
     tickets: () => [d.myTickets.length, d.myTickets.length ? `<div class="feed">${d.myTickets.map((x) => `<div class="feed-item"><a href="#/tickets/${x.id}"><b>#${x.id} ${esc(x.title)}</b></a>
         <div class="muted small">${esc(x.code)} · ${esc(x.project_name)}</div>
         <div style="margin-top:4px;display:flex;gap:6px;flex-wrap:wrap">${ticketBadge(x.status)} ${prioBadge(x.priority)} ${x.due_date ? `<span class="small ${x.due_date < today() ? 'stale' : 'muted'}">due ${fdate(x.due_date)}</span>` : ''}</div></div>`).join('')}</div>` : '<div class="work-empty">No open tickets.</div>'],
+    calendar: () => [mine.events.length, evList(mine.events, { empty: 'Nothing booked in the next two weeks.' })],
     activity: () => [null, `<div class="feed">${d.recent.map(activityItem).join('') || '<div class="work-empty">No activity yet.</div>'}</div>`],
   };
   const msWidget = (mid) => {
@@ -1010,7 +1226,7 @@ async function renderDashboard(asId) {
   $('#newProject')?.addEventListener('click', () => projectForm());
   $('#editDuties')?.addEventListener('click', () => dutiesModal());
   $('#resetLayout')?.addEventListener('click', () => { if (confirm('Go back to the default dashboard for your job?')) save({}); });
-  $('#addWidgetBtn')?.addEventListener('click', () => { const id = $('#addWidget').value; const l = { main: [...layout.main], side: [...layout.side] }; (WIDGETS[id] && ['reminders', 'tickets', 'activity'].includes(id) ? l.side : l.main).push(id); save(l); });
+  $('#addWidgetBtn')?.addEventListener('click', () => { const id = $('#addWidget').value; const l = { main: [...layout.main], side: [...layout.side] }; (WIDGETS[id] && ['calendar', 'reminders', 'tickets', 'activity'].includes(id) ? l.side : l.main).push(id); save(l); });
   const edit = (fn) => (b) => (b.onclick = () => { const l = { main: [...layout.main], side: [...layout.side] }; fn(l, b.dataset.col, Number(b.dataset.i), b); save(l); });
   $$('[data-wmove]', view).forEach(edit((l, col, i, b) => { const j = i + Number(b.dataset.wmove); [l[col][i], l[col][j]] = [l[col][j], l[col][i]]; }));
   $$('[data-wswap]', view).forEach(edit((l, col, i) => { const [id] = l[col].splice(i, 1); l[col === 'main' ? 'side' : 'main'].push(id); }));
@@ -1019,6 +1235,7 @@ async function renderDashboard(asId) {
   $$('[data-assess]', view).forEach((b) => (b.onclick = () => assessModal(mine.dd.find((p) => String(p.id) === b.dataset.assess), () => renderDashboard(asId))));
   bindRebateChips();
   if (own) bindReminderLines(view, () => renderDashboard());
+  bindEvents(view, () => renderDashboard(asId));
 }
 
 // the checkboxes that say what someone is responsible for (used on the dashboard and in Admin)
@@ -1049,7 +1266,7 @@ function dutiesModal() {
 }
 
 function activityItem(a) {
-  const icons = { sent_to_review: '★', assessed: '★', review_info: '?', review_passed: '✕', reopened: '↺', step_done: '✓', reminder_set: '⏰', message: '💬', milestone_updated: '🏁', moved_to_pipeline: '✅', project_created: '🆕', stage_changed: '➡️', status_changed: '🚦', project_updated: '✏️', ticket_created: '🎫', ticket_updated: '🎫', ticket_deleted: '🗑️', documents_uploaded: '📎', document_deleted: '🗑️', note: '📝' };
+  const icons = { event_booked: '📅', sent_to_review: '★', assessed: '★', review_info: '?', review_passed: '✕', reopened: '↺', step_done: '✓', reminder_set: '⏰', message: '💬', milestone_updated: '🏁', moved_to_pipeline: '✅', project_created: '🆕', stage_changed: '➡️', status_changed: '🚦', project_updated: '✏️', ticket_created: '🎫', ticket_updated: '🎫', ticket_deleted: '🗑️', documents_uploaded: '📎', document_deleted: '🗑️', note: '📝' };
   const proj = a.project_name ? ` <a href="#/projects/${a.project_id}">${esc(a.code)}</a>` : '';
   const body = a.action === 'note' ? `<div class="note">${esc(a.detail)}</div>` : `<span>${esc(a.detail || '')}</span>`;
   return `<div class="feed-item">${icons[a.action] || '•'} <b>${esc(a.user_name || 'System')}</b> <span class="muted">${esc(label(a.action))}</span>${proj}
@@ -1663,6 +1880,7 @@ async function renderProject(id) {
           ${p.diligence_completed_at ? `<dt>Approved</dt><dd>${fdate(p.diligence_completed_at)}${p.reviewed_by_name ? ` by ${esc(p.reviewed_by_name)}` : ''}</dd>` : ''}
         </dl>
         ${p.diligence_notes ? `<h3 class="side-h">Notes</h3><div style="white-space:pre-wrap">${esc(p.diligence_notes)}</div>` : ''}</div>
+        <div class="card" id="calCard"></div>
         <div class="card" id="remCard"></div>
         <div class="card"><h2>Customer</h2><dl class="kv">
           <dt>Company</dt><dd>${esc(p.customer_name || '—')}</dd>
@@ -1690,6 +1908,7 @@ async function renderProject(id) {
   $$('[data-pr]', view).forEach((b) => (b.onclick = () => reviewModal(p, b.dataset.pr, (r) => { if (b.dataset.pr === 'approve' && r) location.hash = msHref(p.id, r.milestones.find((x) => x.status === 'in_progress')?.id || r.milestones[0].id); else route(); })));
   bindRebateChips();
   projectRemindersCard(p, $('#remCard')).catch(() => {});
+  projectCalendarCard(p, $('#calCard')).catch(() => {});
   $('#quickStatus').onchange = async (e) => {
     const status = e.target.value; let hold_reason;
     if (['on_hold', 'blocked', 'lost', 'cancelled'].includes(status)) {

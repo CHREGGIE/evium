@@ -130,7 +130,7 @@ function setDuties(userId, body) {
   }
 }
 app.put('/api/me/dashboard', wrap((req, res) => {
-  const ok = (id) => /^(kpis|ms_chart|attention|dd|review|grants|sites|reminders|tickets|activity|ms:\d+)$/.test(String(id));
+  const ok = (id) => /^(kpis|ms_chart|attention|dd|review|grants|sites|reminders|tickets|activity|calendar|ms:\d+)$/.test(String(id));
   const clean = (list) => [...new Set((Array.isArray(list) ? list : []).filter(ok).map(String))].slice(0, 40);
   const body = req.body;
   const layout = body && (body.main || body.side) ? { main: clean(body.main), side: clean(body.side) } : null; // null = back to the default
@@ -501,6 +501,10 @@ function workFor(me, open, { everything = false } = {}) {
     mine.sites = attachMilestones(db.prepare(`${PROJECT_SELECT} WHERE p.owner_id = ? AND p.status IN ${OPEN} AND COALESCE(p.dd_stage, '') <> 'passed'
       ORDER BY p.phase DESC, p.updated_at DESC`).all(me.id));
     mine.reminders = db.prepare(`${REMINDER_SELECT} WHERE r.user_id = ? AND r.done_at IS NULL ORDER BY r.due_on, r.id LIMIT 50`).all(me.id);
+    const today = new Date().toISOString().slice(0, 10);
+    const in14 = new Date(Date.now() + 14 * 864e5).toISOString().slice(0, 10);
+    mine.events = withPeople(db.prepare(`${EVENT_SELECT} WHERE e.status = 'scheduled' AND e.ends_at >= ? AND e.starts_at < ?
+      AND e.id IN (SELECT event_id FROM event_people WHERE user_id = ?) ORDER BY e.starts_at LIMIT 30`).all(`${today}T00:00`, `${in14}T23:59`, me.id));
   }
   return mine;
 }
@@ -1110,6 +1114,166 @@ setTimeout(async () => {
   const todo = db.prepare("SELECT id FROM projects WHERE lat IS NULL AND geocoded_at IS NULL AND (TRIM(COALESCE(address,'')) <> '' OR TRIM(COALESCE(city,'')) <> '')").all();
   for (const { id } of todo) { await geocodeProject(id); await new Promise((r) => setTimeout(r, 1000)); }
 }, 3000).unref();
+
+// ---------- calendar ----------
+const EVENT_KINDS = { site_walk: 'Site walk', installation: 'Installation', inspection: 'Inspection', meeting: 'Meeting', other: 'Other' };
+const DT = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/;
+const EVENT_SELECT = `SELECT e.*, p.code, p.name AS project_name, p.address, p.city, p.state, m.name AS milestone, c.name AS created_by_name
+  FROM events e LEFT JOIN projects p ON p.id = e.project_id LEFT JOIN milestones m ON m.id = e.milestone_id LEFT JOIN users c ON c.id = e.created_by`;
+function withPeople(list) {
+  if (!list.length) return list;
+  const ids = list.map((e) => e.id);
+  const by = {};
+  db.prepare(`SELECT ep.event_id, u.id, u.name FROM event_people ep JOIN users u ON u.id = ep.user_id WHERE ep.event_id IN (${ids.map(() => '?').join(',')}) ORDER BY u.name`)
+    .all(...ids).forEach((r) => (by[r.event_id] ||= []).push({ id: r.id, name: r.name }));
+  list.forEach((e) => (e.people = by[e.id] || []));
+  return list;
+}
+const getEvent = (id) => withPeople([db.prepare(`${EVENT_SELECT} WHERE e.id = ?`).get(id)].filter(Boolean))[0];
+const eventTitle = (e) => e.title || `${EVENT_KINDS[e.kind]}${e.project_name ? `: ${e.project_name}` : ''}`;
+const fmtWhen = (e) => {
+  const [d, t] = e.starts_at.split('T'); const [d2, t2] = e.ends_at.split('T');
+  return `${d} ${t}–${d2 === d ? t2 : `${d2} ${t2}`}`;
+};
+// the milestone a booking belongs to: site walks → the site walk milestone, installations → installation
+function milestoneForKind(kind) {
+  const like = { site_walk: '%site walk%', installation: '%install%', inspection: '%install%' }[kind];
+  return like ? db.prepare('SELECT * FROM milestones WHERE LOWER(name) LIKE ? ORDER BY position LIMIT 1').get(like) : null;
+}
+// people already booked at an overlapping time
+function conflictsFor(people, starts, ends, exceptId) {
+  if (!people.length) return [];
+  return db.prepare(`SELECT e.id, e.kind, e.title, e.starts_at, e.ends_at, p.name AS project_name, u.name AS person
+      FROM events e JOIN event_people ep ON ep.event_id = e.id JOIN users u ON u.id = ep.user_id LEFT JOIN projects p ON p.id = e.project_id
+      WHERE e.status <> 'cancelled' AND e.starts_at < ? AND e.ends_at > ? AND ep.user_id IN (${people.map(() => '?').join(',')}) ${exceptId ? 'AND e.id <> ?' : ''}`)
+    .all(ends, starts, ...people, ...(exceptId ? [exceptId] : []));
+}
+function cleanEvent(body, existing) {
+  const d = {};
+  if ('kind' in body) { if (!EVENT_KINDS[body.kind]) bad('Pick a booking type'); d.kind = body.kind; }
+  for (const k of ['starts_at', 'ends_at']) if (k in body) { if (!DT.test(String(body[k]))) bad('Pick a date and time'); d[k] = String(body[k]); }
+  for (const k of ['title', 'location', 'notes']) if (k in body) d[k] = String(body[k] ?? '').trim().slice(0, 2000) || null;
+  if ('status' in body) { if (!['scheduled', 'done', 'cancelled'].includes(body.status)) bad('Invalid status'); d.status = body.status; }
+  if ('project_id' in body) {
+    d.project_id = body.project_id ? Number(body.project_id) : null;
+    if (d.project_id && !db.prepare('SELECT 1 FROM projects WHERE id = ?').get(d.project_id)) bad('Unknown site');
+  }
+  const starts = d.starts_at ?? existing?.starts_at; const ends = d.ends_at ?? existing?.ends_at;
+  if (starts && ends && ends <= starts) bad('The end has to be after the start');
+  return d;
+}
+const peopleFrom = (body) => [...new Set((Array.isArray(body.people) ? body.people : []).map(Number).filter(Boolean))]
+  .filter((id) => db.prepare('SELECT 1 FROM users WHERE id = ? AND active = 1').get(id));
+
+app.get('/api/events', (req, res) => {
+  const where = []; const args = [];
+  const { from, to, user_id, kind, project_id, milestone_id, include_cancelled } = req.query;
+  if (from) { where.push('e.ends_at >= ?'); args.push(String(from)); }
+  if (to) { where.push('e.starts_at < ?'); args.push(String(to)); }
+  if (kind) { where.push('e.kind = ?'); args.push(kind); }
+  if (project_id) { where.push('e.project_id = ?'); args.push(Number(project_id)); }
+  if (milestone_id) { where.push('e.milestone_id = ?'); args.push(Number(milestone_id)); }
+  if (user_id) { where.push('e.id IN (SELECT event_id FROM event_people WHERE user_id = ?)'); args.push(user_id === 'me' ? req.user.id : Number(user_id)); }
+  if (!include_cancelled) where.push("e.status <> 'cancelled'");
+  res.json(withPeople(db.prepare(`${EVENT_SELECT} ${where.length ? `WHERE ${where.join(' AND ')}` : ''} ORDER BY e.starts_at, e.id LIMIT 1000`).all(...args)));
+});
+
+app.post('/api/events', wrap((req, res) => {
+  const body = req.body || {};
+  const d = cleanEvent({ kind: 'site_walk', ...body });
+  if (!d.starts_at || !d.ends_at) bad('Pick a date and time');
+  const people = peopleFrom(body);
+  const clash = conflictsFor(people, d.starts_at, d.ends_at);
+  if (clash.length && !body.force) throw new HttpError(409, 'Double-booked', { conflicts: clash });
+  const p = d.project_id ? db.prepare('SELECT * FROM projects WHERE id = ?').get(d.project_id) : null;
+  const m = p ? milestoneForKind(d.kind) : null;
+  if (!d.location && p) d.location = [p.address, p.city, p.state, p.zip].filter(Boolean).join(', ') || null;
+  const t = now();
+  const id = db.transaction(() => {
+    const cols = [...Object.keys(d), 'milestone_id', 'created_by'];
+    const eid = db.prepare(`INSERT INTO events (${cols.join(',')}) VALUES (${cols.map(() => '?').join(',')})`).run(...Object.values(d), m?.id ?? null, req.user.id).lastInsertRowid;
+    const ins = db.prepare('INSERT INTO event_people (event_id, user_id) VALUES (?,?)');
+    people.forEach((u) => ins.run(eid, u));
+    const e = getEvent(eid);
+    if (p) {
+      logActivity(p.id, req.user.id, 'event_booked', `${EVENT_KINDS[d.kind]} booked for ${fmtWhen(e)}${people.length ? ` with ${e.people.map((x) => x.name).join(', ')}` : ''}`);
+      // booking it means the work has started: milestone in progress, and tick a "schedule…" step if there is one
+      if (m && p.phase === 'pipeline') {
+        const st = db.prepare('SELECT status FROM project_milestones WHERE project_id = ? AND milestone_id = ?').get(p.id, m.id)?.status || 'not_started';
+        if (st === 'not_started') setMilestone(p.id, m, 'in_progress', req.user.id, null, t);
+        ensureSteps(p.id, m.id);
+        const step = db.prepare("SELECT id FROM project_steps WHERE project_id = ? AND milestone_id = ? AND done_at IS NULL AND LOWER(label) LIKE '%schedul%' ORDER BY position LIMIT 1").get(p.id, m.id);
+        if (step) db.prepare('UPDATE project_steps SET done_at = ?, done_by = ? WHERE id = ?').run(t, req.user.id, step.id);
+      }
+    }
+    notify(people, { kind: 'calendar', projectId: p?.id, milestoneId: m?.id, actorId: req.user.id,
+      text: `${req.user.name} booked you for ${eventTitle(e)} on ${fmtWhen(e)}${e.location ? ` at ${e.location}` : ''}` });
+    return eid;
+  })();
+  res.status(201).json(getEvent(id));
+}));
+
+app.patch('/api/events/:id', wrap((req, res) => {
+  const before = getEvent(req.params.id) || notFound('Booking not found');
+  const body = req.body || {};
+  const d = cleanEvent(body, before);
+  const people = 'people' in body ? peopleFrom(body) : before.people.map((x) => x.id);
+  const starts = d.starts_at ?? before.starts_at; const ends = d.ends_at ?? before.ends_at;
+  const moved = starts !== before.starts_at || ends !== before.ends_at;
+  if ((moved || 'people' in body) && (d.status ?? before.status) !== 'cancelled') {
+    const clash = conflictsFor(people, starts, ends, before.id);
+    if (clash.length && !body.force) throw new HttpError(409, 'Double-booked', { conflicts: clash });
+  }
+  db.transaction(() => {
+    const cols = Object.keys(d);
+    if (cols.length) db.prepare(`UPDATE events SET ${cols.map((c) => `${c} = ?`).join(', ')}, updated_at = ? WHERE id = ?`).run(...Object.values(d), now(), before.id);
+    if ('people' in body) {
+      db.prepare('DELETE FROM event_people WHERE event_id = ?').run(before.id);
+      people.forEach((u) => db.prepare('INSERT INTO event_people (event_id, user_id) VALUES (?,?)').run(before.id, u));
+    }
+    const e = getEvent(before.id);
+    const added = people.filter((u) => !before.people.some((x) => x.id === u));
+    const kept = people.filter((u) => !added.includes(u));
+    const base = { kind: 'calendar', projectId: e.project_id, milestoneId: e.milestone_id, actorId: req.user.id };
+    if (d.status === 'cancelled' && before.status !== 'cancelled') notify(people, { ...base, text: `${req.user.name} cancelled ${eventTitle(e)} on ${fmtWhen(before)}` });
+    else {
+      if (moved) notify(kept, { ...base, text: `${req.user.name} moved ${eventTitle(e)} to ${fmtWhen(e)}` });
+      if (added.length) notify(added, { ...base, text: `${req.user.name} booked you for ${eventTitle(e)} on ${fmtWhen(e)}${e.location ? ` at ${e.location}` : ''}` });
+    }
+    if (e.project_id && (moved || d.status)) logActivity(e.project_id, req.user.id, 'event_booked', `${EVENT_KINDS[e.kind]} ${d.status === 'cancelled' ? 'cancelled' : d.status === 'done' ? 'done' : `moved to ${fmtWhen(e)}`}`);
+  })();
+  res.json(getEvent(before.id));
+}));
+
+app.delete('/api/events/:id', wrap((req, res) => {
+  const e = getEvent(req.params.id) || notFound('Booking not found');
+  db.prepare('DELETE FROM events WHERE id = ?').run(e.id);
+  notify(e.people.map((x) => x.id), { kind: 'calendar', projectId: e.project_id, actorId: req.user.id, text: `${req.user.name} deleted ${eventTitle(e)} on ${fmtWhen(e)}` });
+  res.json({ ok: true });
+}));
+
+app.get('/api/events/:id', (req, res) => {
+  const e = getEvent(req.params.id);
+  if (!e) return res.status(404).json({ error: 'Booking not found' });
+  res.json(e);
+});
+
+// "Add to my calendar": a standard .ics file for Outlook, Google Calendar or Apple Calendar
+app.get('/api/events/:id/ics', (req, res) => {
+  const e = getEvent(req.params.id);
+  if (!e) return res.status(404).json({ error: 'Booking not found' });
+  const ical = (s) => String(s || '').replace(/\\/g, '\\\\').replace(/\n/g, '\\n').replace(/[,;]/g, (c) => `\\${c}`);
+  const dt = (s) => s.replace(/[-:]/g, '') + '00';
+  const stamp = new Date().toISOString().replace(/[-:]/g, '').replace(/\.\d+/, '');
+  const body = ['BEGIN:VCALENDAR', 'VERSION:2.0', 'PRODID:-//Evium//CRM//EN', 'BEGIN:VEVENT',
+    `UID:evium-event-${e.id}@evium-crm`, `DTSTAMP:${stamp}`, `DTSTART:${dt(e.starts_at)}`, `DTEND:${dt(e.ends_at)}`,
+    `SUMMARY:${ical(eventTitle(e))}`, e.location ? `LOCATION:${ical(e.location)}` : '',
+    `DESCRIPTION:${ical([e.code ? `${e.code} ${e.project_name}` : '', e.people.length ? `With: ${e.people.map((x) => x.name).join(', ')}` : '', e.notes || ''].filter(Boolean).join('\n'))}`,
+    e.status === 'cancelled' ? 'STATUS:CANCELLED' : 'STATUS:CONFIRMED', 'END:VEVENT', 'END:VCALENDAR'].filter(Boolean).join('\r\n');
+  res.setHeader('Content-Type', 'text/calendar; charset=utf-8');
+  res.setHeader('Content-Disposition', `attachment; filename="evium-${e.kind}-${e.id}.ics"`);
+  res.send(body);
+});
 
 // ---------- tickets ----------
 const TICKET_FIELDS = ['title', 'description', 'type', 'priority', 'status', 'assignee_id', 'due_date'];

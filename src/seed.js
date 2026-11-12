@@ -263,6 +263,28 @@ if (seedPipeline) db.transaction(() => {
     insMsg.run(pi, m?.id ?? null, m?.name ?? null, siteOwner(pi), body, ago);
   });
 
+  // calendar bookings around today: [project, type, days from today, start, end, extra days it runs, status, notes]
+  const insEv = db.prepare(`INSERT INTO events (project_id, milestone_id, kind, starts_at, ends_at, location, notes, status, created_by)
+    VALUES (?,?,?, strftime('%Y-%m-%d', 'now', ?) || 'T' || ?, strftime('%Y-%m-%d', 'now', ?) || 'T' || ?, ?,?,?,?)`);
+  const insEP = db.prepare('INSERT INTO event_people (event_id, user_id) VALUES (?,?)');
+  const msLike = (s) => milestones.find((m) => m.name.toLowerCase().includes(s))?.id ?? null;
+  [
+    [9, 'site_walk', 1, '09:00', '11:00', 0, 'scheduled', 'Meet the garage manager at the Market St entrance.'],
+    [5, 'site_walk', 3, '13:00', '14:30', 0, 'scheduled', 'City facilities contact will walk the lot with us.'],
+    [6, 'installation', 6, '08:00', '16:00', 2, 'scheduled', 'Crew of 3. Dispensers arrive the day before.'],
+    [1, 'inspection', 2, '10:00', '11:00', 0, 'scheduled', 'Electrical rough-in inspection with the City of Austin.'],
+    [3, 'meeting', 2, '14:00', '15:00', 0, 'scheduled', 'Go through the revised proposal with Priya.'],
+    [7, 'installation', -9, '08:00', '16:00', 1, 'done', null],
+    [13, 'site_walk', -12, '10:00', '12:00', 0, 'done', null],
+  ].forEach(([pi, kind, d, t1, t2, extra, status, notes]) => {
+    const p = db.prepare('SELECT * FROM projects WHERE id = ?').get(pi); if (!p) return;
+    const mid = kind === 'site_walk' ? msLike('site walk') : ['installation', 'inspection'].includes(kind) ? msLike('install') : null;
+    const loc = [p.address, p.city, p.state, p.zip].filter(Boolean).join(', ');
+    const eid = insEv.run(pi, mid, kind, `${d >= 0 ? '+' : ''}${d} days`, t1, `${d + extra >= 0 ? '+' : ''}${d + extra} days`, t2, loc, notes, status, admin).lastInsertRowid;
+    insEP.run(eid, p.owner_id || admin);
+    if (kind === 'meeting') insEP.run(eid, admin);
+  });
+
   // follow-up reminders (one due today for the admin, so the Dashboard shows it)
   const insRem = db.prepare(`INSERT INTO reminders (project_id, milestone_id, user_id, created_by, due_on, text) VALUES (?,?,?,?, date('now', ?), ?)`);
   insRem.run(1, milestones[3]?.id ?? null, admin, admin, '+0 days', 'Chase City of Austin on the plan review');
