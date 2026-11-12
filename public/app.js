@@ -347,6 +347,11 @@ const deadlineText = (d) => {
 const needsCheck = (r) => (r.verified ? '' : badge('rb-check', 'Sample · needs checking'));
 // small clickable chip for a rebate on a site
 const rebateChip = (r) => `<button type="button" class="rebate-chip" data-rebate="${r.id}" title="Show rebate details">💲 ${esc(r.name)}${r.status && r.status !== 'open' ? ` <span class="muted">(${esc(REBATE_STATUS[r.status] || r.status)})</span>` : ''}</button>`;
+const rebateCard = (r, extra = '') => `<button type="button" class="rebate-card" data-rebate="${r.id}" title="Show everything about this rebate">
+    <span class="rc-top"><b>${esc(r.name)}</b>${r.status ? rebateStatusBadge(r.status) : ''}</span>
+    ${r.amount_text ? `<span class="rc-amt">${esc(r.amount_text)}</span>` : ''}
+    <span class="rc-foot"><span>${[REBATE_KIND[r.kind], r.deadline ? deadlineText(r.deadline) : '', r.verified === 0 ? 'sample, needs checking' : ''].filter(Boolean).map(esc).join(' · ')}${extra ? ` · ${extra}` : ''}</span><span class="rc-more">View details ›</span></span>
+  </button>`;
 const bindRebateChips = (root = view) => $$('[data-rebate]', root).forEach((b) => (b.onclick = (e) => { e.stopPropagation(); rebateInfo(b.dataset.rebate); }));
 
 async function renderRebates() {
@@ -938,7 +943,8 @@ async function renderDiligence() {
         <div class="dd-score">${ratingView(p.dd_rating)}</div>
       </div>
       <div class="dd-insight">${esc(p.dd_insight || '')}</div>
-      <div class="small dd-facts">${siteFacts(p)}${p.rebates.length ? ` · ${p.rebates.map(rebateChip).join(' ')}` : ''}</div>
+      <div class="small dd-facts">${siteFacts(p)}</div>
+      ${p.rebates.length ? `<div class="rc-row">${p.rebates.map((r) => rebateCard(r)).join('')}</div>` : ''}
       <div class="dd-card2-foot">
         <span class="muted small">Assessed by ${esc(p.assessed_by_name || '—')} · ${fdate(p.dd_assessed_at)}${managersFor(p.state).length ? ` · ${esc(p.state)} manager: ${esc(managersFor(p.state).map((u) => u.name).join(', '))}` : ''}</span>
         <span class="dd-btns">${canReview()
@@ -1466,13 +1472,18 @@ async function renderProject(id) {
         <div class="card"><h2>Property</h2><dl class="kv">
           <dt>Property owner</dt><dd>${esc(p.property_owner || '—')}</dd>
           <dt>Owner contact</dt><dd>${esc(p.property_owner_contact || '—')}</dd>
-          <dt>Rebate</dt><dd>${p.rebates.map(rebateChip).join(' ')}${p.rebate_program ? `${p.rebates.length ? '<br>' : ''}${esc(p.rebate_program)}` : p.rebates.length ? '' : '—'}${p.rebate_amount ? `<div class="muted small">expected ${money(p.rebate_amount)}</div>` : ''}</dd>
           <dt>Utility</dt><dd>${p.utility_id ? `<a href="#/utilities/${p.utility_id}">${esc(p.utility_company)}</a>` : esc(p.utility_company || '—')}</dd>
-          <dt>Tax credit</dt><dd>${p.tax_credit_id ? rebateChip(S.meta.rebates.find((r) => r.id === p.tax_credit_id) || { id: p.tax_credit_id, name: 'Tax credit' }) : '—'}
-            <div class="muted small">${{ yes: 'Eligible', no: 'Not eligible', unknown: 'Eligibility not checked yet' }[p.tax_credit_eligible || 'unknown']}${p.tax_credit_amount ? ` · est. ${money(p.tax_credit_amount)}` : ''}</div></dd>
           ${p.dd_rating ? `<dt>Rating</dt><dd>${ratingView(p.dd_rating)}</dd>` : ''}
           ${p.diligence_completed_at ? `<dt>Approved</dt><dd>${fdate(p.diligence_completed_at)}${p.reviewed_by_name ? ` by ${esc(p.reviewed_by_name)}` : ''}</dd>` : ''}
-        </dl>${p.diligence_notes ? `<h3 style="margin-top:14px">Notes</h3><div style="white-space:pre-wrap">${esc(p.diligence_notes)}</div>` : ''}</div>
+        </dl>
+        <h3 class="side-h">Rebate</h3>
+        ${p.rebates.map((r, i) => rebateCard(r, i === 0 && p.rebate_amount ? `expected ${money(p.rebate_amount)}` : '')).join('')}
+        ${p.rebate_program ? `<div class="small" style="margin-top:6px">${p.rebates.length ? 'Also: ' : ''}${esc(p.rebate_program)}${!p.rebates.length && p.rebate_amount ? ` · expected ${money(p.rebate_amount)}` : ''}</div>` : ''}
+        ${!p.rebates.length && !p.rebate_program ? '<div class="muted small">None chosen yet. Click <b>Edit</b> to pick one from the Rebates board.</div>' : ''}
+        <h3 class="side-h">Tax credit</h3>
+        ${p.tax_credit_id ? rebateCard(S.meta.rebates.find((r) => r.id === p.tax_credit_id) || { id: p.tax_credit_id, name: 'Tax credit' },
+          `${{ yes: 'eligible', no: 'not eligible', unknown: 'eligibility not checked' }[p.tax_credit_eligible || 'unknown']}${p.tax_credit_amount ? `, est. ${money(p.tax_credit_amount)}` : ''}`) : '<div class="muted small">None.</div>'}
+        ${p.diligence_notes ? `<h3 class="side-h">Notes</h3><div style="white-space:pre-wrap">${esc(p.diligence_notes)}</div>` : ''}</div>
         <div class="card" id="remCard"></div>
         <div class="card"><h2>Customer</h2><dl class="kv">
           <dt>Company</dt><dd>${esc(p.customer_name || '—')}</dd>
