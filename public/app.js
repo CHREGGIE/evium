@@ -59,51 +59,13 @@ const OPEN_STATUSES = ['active', 'on_hold', 'blocked'];
 const msWhen = (x) => (x.status === 'done' && x.completed_at ? `done ${fdate(x.completed_at)}`
   : x.status === 'in_progress' ? `${x.days_open ?? 0}d in progress${x.overdue ? ` · over ${x.sla_days}d target` : ''}` : '');
 // small row of chips: one per milestone, showing its status
-const msStrip = (p, { names = true, chat = false } = {}) => `<span class="ms-strip">${S.meta.milestones.map((m, i) => {
+const msStrip = (p, { names = true, link = false } = {}) => `<span class="ms-strip">${S.meta.milestones.map((m, i) => {
   const x = p.milestones?.[i] || { status: 'not_started' };
-  const title = `${esc(m.name)}: ${MS_LABEL[x.status]}${msWhen(x) ? ` (${esc(msWhen(x))})` : ''}${chat ? ` · click to open its chat${x.msg_count ? ` (${x.msg_count} messages)` : ''}` : ''}`;
-  return `<span class="ms ms-${x.status}${x.overdue ? ' ms-overdue' : ''}${chat ? ' ms-click' : ''}" title="${title}"${chat ? ` data-chat="${m.id}" data-pid="${p.id}"` : ''}>${MS_ICON[x.status]}${names ? ` ${esc(m.name)}` : ''}${chat && x.msg_count ? `<sup>${x.msg_count}</sup>` : ''}</span>`;
+  const title = `${esc(m.name)}: ${MS_LABEL[x.status]}${msWhen(x) ? ` (${esc(msWhen(x))})` : ''}${link ? ' · click to open' : ''}`;
+  return `<span class="ms ms-${x.status}${x.overdue ? ' ms-overdue' : ''}${link ? ' ms-click' : ''}" title="${title}"${link ? ` data-goto="#/projects/${p.id}/m/${m.id}"` : ''}>${MS_ICON[x.status]}${names ? ` ${esc(m.name)}` : ''}</span>`;
 }).join('')}</span>`;
 const progressBadge = (p) => (p.phase === 'diligence' ? phaseBadge() : p.ms_complete ? badge('ms-live', '✓ Live') : badge('', `${p.ms_done}/${p.ms_total} done`));
 const isFlagged = (p) => p.ms_overdue > 0 && OPEN_STATUSES.includes(p.status);
-// full editor: each milestone with a 4-way switch
-const msEditor = (p) => `<div class="ms-editor">${S.meta.milestones.map((m, i) => {
-  const x = p.milestones[i];
-  return `<div class="ms-row ${x.overdue ? 'ms-overdue' : ''}">
-    <div class="ms-name"><button type="button" class="ms-chat" data-chat="${m.id}" data-pid="${p.id}" title="Open the ${esc(m.name)} chat"><span class="dot" style="background:${esc(m.color)}"></span><b>${esc(m.name)}</b><span class="ms-chat-n">💬${x.msg_count ? ` ${x.msg_count}` : ''}</span></button><span class="small ${x.overdue ? 'stale' : 'muted'}">${esc(msWhen(x))}</span>
-      ${x.docs_missing?.length ? `<span class="small doc-need" title="Upload this before marking it done">📎 needs ${x.docs_missing.map((c) => esc(label(c))).join(', ')}</span>` : ''}
-      <button type="button" class="ms-remind" data-remind="${m.id}" data-pid="${p.id}" title="Set a follow-up reminder" aria-label="Set a reminder for ${esc(m.name)}">⏰</button></div>
-    <div class="seg" role="group" aria-label="${esc(m.name)}">${MS_STATUSES.map((s) => `<button type="button" class="${x.status === s ? `on is-${s}` : ''}" data-ms="${m.id}" data-pid="${p.id}" data-st="${s}" aria-pressed="${x.status === s}">${MS_LABEL[s]}</button>`).join('')}</div>
-  </div>`;
-}).join('')}</div>`;
-function bindMsEditor(root, after, findProject) {
-  // clicking a milestone (its name, or its chip in a pipeline row) opens its chat
-  $$('[data-chat]', root).forEach((b) => (b.onclick = (e) => {
-    e.stopPropagation();
-    const proj = findProject(b.dataset.pid);
-    if (proj) openChat(proj, Number(b.dataset.chat), () => after(proj));
-  }));
-  $$('[data-remind]', root).forEach((b) => (b.onclick = (e) => {
-    e.stopPropagation();
-    const proj = findProject(b.dataset.pid);
-    if (proj) reminderModal(proj, Number(b.dataset.remind), () => after(proj));
-  }));
-  $$('[data-ms]', root).forEach((b) => (b.onclick = async (e) => {
-    e.stopPropagation();
-    if (b.classList.contains('on')) return;
-    const put = async () => {
-      const saved = await api('PUT', `/api/projects/${b.dataset.pid}/milestones/${b.dataset.ms}`, { status: b.dataset.st });
-      toast(saved.ms_complete ? `${saved.code}: all milestones finished 🎉` : 'Milestone updated');
-      after(saved);
-    };
-    try { await put(); } catch (err) {
-      // a required document is missing: offer to upload it right here, then mark it done
-      if (err.data?.missing_docs) docUploadModal(b.dataset.pid, Number(b.dataset.ms), err.data.missing_docs, () => put().catch(fail));
-      else fail(err);
-    }
-  }));
-}
-
 async function api(method, url, body) {
   const opt = { method, headers: {} };
   if (body instanceof FormData) opt.body = body;
@@ -211,6 +173,7 @@ async function route() {
     else if (page === 'rebates') await renderRebates();
     else if (page === 'utilities' && id) await renderUtility(id);
     else if (page === 'utilities') await renderUtilities();
+    else if (page === 'projects' && id && parts[2] === 'm' && parts[3]) await renderMilestone(id, parts[3]);
     else if (page === 'projects' && id) await renderProject(id);
     else if (page === 'projects') await renderProjects();
     else if (page === 'tickets') { await renderTickets(); if (id) openTicket(id, () => { history.replaceState(null, '', '#/tickets'); renderTickets(); }); }
@@ -351,20 +314,21 @@ async function projectRemindersCard(p, el) {
 
 // ---------- required documents ----------
 // A milestone can need a document (e.g. a signed contract) before it can be marked done.
-function docUploadModal(projectId, milestoneId, missing, retry) {
+function docUploadModal(projectId, milestoneId, missing, retry, { onCancel } = {}) {
   const m = msById(milestoneId);
-  const card = openModal(`${modalHead(`📎 ${esc(m?.name || 'Milestone')} needs a document`)}
+  const card = openModal(`${modalHead(`${esc(m?.name || 'Milestone')} needs a document`)}
     <p>Before <b>${esc(m?.name || 'this milestone')}</b> can be marked done, upload ${missing.map((c) => `a <b>${esc(label(c))}</b>`).join(' and ')} document.</p>
     <form class="grid">
       <label>Document type<select name="category">${options(S.meta.enums.docCategory, missing[0])}</select></label>
       <label>File(s)<input type="file" name="files" multiple required></label>
       <div class="modal-foot"><button type="button" class="btn" data-close>Cancel</button><button class="btn primary">Upload and mark done</button></div>
-    </form>`);
+    </form>`, { onClose: onCancel });
   $('form', card).addEventListener('submit', async (e) => {
     e.preventDefault();
     const fd = new FormData();
     [...$('[name=files]', card).files].forEach((f) => fd.append('files', f));
     fd.append('category', $('[name=category]', card).value);
+    fd.append('milestone_id', milestoneId);
     const btn = $('button.primary', card); btn.disabled = true; btn.textContent = 'Uploading…';
     try { await api('POST', `/api/projects/${projectId}/documents`, fd); modalClose = null; closeModal(); await retry(); }
     catch (err) { fail(err); btn.disabled = false; btn.textContent = 'Upload and mark done'; }
@@ -721,6 +685,129 @@ async function renderMap() {
   if (onMap.length) map.fitBounds(L.latLngBounds(onMap.map((p) => [p.lat, p.lng])).pad(0.2), { maxZoom: 12 });
 }
 
+// ---------- milestone list + milestone pages ----------
+// Each milestone is its own page with a checklist of steps, its own files, discussion and reminders.
+const msHref = (pid, mid) => `#/projects/${pid}/m/${mid}`;
+const msStatusPill = (s, overdue) => `<span class="ms-pill ms-pill-${s}${overdue ? ' late' : ''}">${overdue ? 'Running late' : MS_LABEL[s]}</span>`;
+const msMeta = (x) => (x.status === 'done' && x.completed_at ? `Done ${fdate(x.completed_at)}`
+  : x.status === 'in_progress' ? `${x.days_open ?? 0} days in progress${x.overdue ? ` (target ${x.sla_days})` : ''}`
+  : x.status === 'not_needed' ? 'Not needed for this site' : 'Not started');
+
+// clean list of milestones; each row opens the milestone page
+const msList = (p) => `<div class="ms-list">${S.meta.milestones.map((m, i) => {
+  const x = p.milestones[i];
+  const pct = x.steps_total ? Math.round((x.steps_done / x.steps_total) * 100) : x.status === 'done' ? 100 : 0;
+  return `<a class="ms-item ${x.status === 'not_needed' ? 'is-na' : ''}" href="${msHref(p.id, m.id)}">
+    <span class="ms-bar" style="background:${esc(m.color)}"></span>
+    <span class="ms-item-main"><span class="ms-item-name">${esc(m.name)}</span><span class="ms-item-meta ${x.overdue ? 'stale' : ''}">${esc(msMeta(x))}</span></span>
+    <span class="ms-item-steps">${x.status === 'not_needed' ? '' : `<span class="ms-progress"><span style="width:${pct}%"></span></span><span>${x.steps_done} of ${x.steps_total} steps</span>`}</span>
+    <span class="ms-item-files">${x.doc_count ? `${x.doc_count} file${x.doc_count === 1 ? '' : 's'}` : ''}</span>
+    ${msStatusPill(x.status, x.overdue)}
+    <span class="ms-chev" aria-hidden="true">›</span></a>`;
+}).join('')}</div>`;
+
+// best guess at what kind of file a milestone collects
+const defaultCategory = (m) => {
+  const n = m.name.toLowerCase();
+  if (m.required?.[0]) return m.required[0];
+  if (n.includes('proposal')) return 'proposal';
+  if (n.includes('contract')) return 'contract';
+  if (n.includes('permit')) return 'permit';
+  if (n.includes('approval') || n.includes('utility')) return 'utility';
+  if (n.includes('site') || n.includes('install')) return 'photo';
+  return 'other';
+};
+
+async function renderMilestone(pid, mid) {
+  const d = await api('GET', `/api/projects/${pid}/milestones/${mid}`);
+  const { project: p, milestone: m, state: x, steps } = d;
+  $$('[data-nav]').forEach((a) => a.classList.toggle('active', a.dataset.nav === (p.phase === 'diligence' ? 'diligence' : 'projects')));
+  const done = steps.filter((s) => s.done_at).length;
+  const have = new Set([...d.documents.map((f) => f.category), ...d.otherDocs.map((f) => f.category)]);
+  const allDone = steps.length && done === steps.length;
+  view.innerHTML = `
+    <div class="muted small crumbs"><a href="#/projects">Projects</a> / <a href="#/projects/${p.id}">${esc(p.code)} ${esc(p.name)}</a> / ${esc(m.name)}</div>
+    <div class="page-head ms-head">
+      <div><h1><span class="ms-dot" style="background:${esc(m.color)}"></span>${esc(m.name)}</h1>
+        <div class="muted small" style="margin-top:4px">${esc(p.address || p.name)}${p.city ? `, ${esc(p.city)}` : ''} · <span class="${x.overdue ? 'stale' : ''}">${esc(msMeta(x))}</span> · target ${m.sla_days} days</div></div>
+      <div class="actions">
+        ${p.phase === 'pipeline' ? `<label class="status-select">Status<select id="msStatus">${options(MS_STATUSES.map((s) => [s, MS_LABEL[s]]), x.status)}</select></label>`
+          : '<span class="muted small">Move this property to the pipeline to start tracking it.</span>'}
+      </div>
+    </div>
+    <div class="ms-nav">
+      ${d.prev ? `<a class="btn sm" href="${msHref(p.id, d.prev.id)}">‹ ${esc(d.prev.name)}</a>` : '<span></span>'}
+      <a class="btn sm" href="#/projects/${p.id}">All milestones</a>
+      ${d.next ? `<a class="btn sm" href="${msHref(p.id, d.next.id)}">${esc(d.next.name)} ›</a>` : '<span></span>'}
+    </div>
+    <div class="cols-main">
+      <div class="grid" style="gap:16px">
+        <section class="card">
+          <div class="card-head"><h2>Steps</h2><span class="muted small">${done} of ${steps.length} done</span></div>
+          <div class="ms-progress big"><span style="width:${steps.length ? Math.round((done / steps.length) * 100) : 0}%"></span></div>
+          ${allDone && x.status !== 'done' && p.phase === 'pipeline' ? `<div class="all-done">Every step is done. <button class="btn primary sm" id="markDone">Mark ${esc(m.name)} done</button></div>` : ''}
+          <ul class="steps">${steps.map((s) => `<li class="${s.done_at ? 'is-done' : ''}">
+              <label class="step-check"><input type="checkbox" data-step="${s.id}" ${s.done_at ? 'checked' : ''}><span>${esc(s.label)}</span></label>
+              <span class="step-meta">${s.done_at ? `${esc(s.done_by_name || '')}${s.done_by_name ? ' · ' : ''}${fdate(s.done_at)}` : ''}</span>
+              <button type="button" class="step-del" data-delstep="${s.id}" title="Remove step" aria-label="Remove step">×</button></li>`).join('')
+            || '<li class="muted small">No steps yet. Add the first one below.</li>'}</ul>
+          <form class="add-step" id="addStep"><input name="label" placeholder="Add a step for this site…" autocomplete="off"><button class="btn sm">Add</button></form>
+        </section>
+        <section class="card">
+          <div class="card-head"><h2>Documents</h2><span class="muted small">${d.documents.length} file${d.documents.length === 1 ? '' : 's'}</span></div>
+          ${m.required.length ? `<div class="req-docs small">Needed before this can be marked done: ${m.required.map((c) => `<span class="req-doc ${have.has(c) ? 'ok' : ''}">${have.has(c) ? '✓' : '•'} ${esc(label(c))}</span>`).join(' ')}</div>` : ''}
+          <div class="upload-row">
+            <select id="upCat" aria-label="Document type">${options(S.meta.enums.docCategory, defaultCategory(m))}</select>
+            <input type="file" id="upFiles" multiple aria-label="Choose files">
+            <button class="btn primary sm" id="upBtn">Upload</button>
+          </div>
+          <div id="msDocs" style="margin-top:12px">${docList(d.documents)}</div>
+        </section>
+      </div>
+      <div class="grid" style="gap:16px">
+        <section class="card"><h2>Discussion</h2><p class="muted small" style="margin-top:-6px">Also shows in the site's main chat.</p><div id="msChat"></div></section>
+        <section class="card"><div class="card-head"><h2>Reminders</h2><button class="btn sm" id="msRemind">Add</button></div>
+          <div class="rem-list">${d.reminders.map((r) => reminderLine(r, { showSite: false })).join('') || '<div class="muted small">No follow-ups set.</div>'}</div></section>
+      </div>
+    </div>`;
+
+  const again = () => renderMilestone(pid, mid);
+  const setStatus = async (status) => {
+    const put = async () => { await api('PUT', `/api/projects/${p.id}/milestones/${m.id}`, { status }); toast(`${m.name}: ${MS_LABEL[status].toLowerCase()}`); again(); };
+    try { await put(); } catch (err) {
+      if (err.data?.missing_docs) docUploadModal(p.id, m.id, err.data.missing_docs, () => put().catch(fail), { onCancel: again });
+      else { fail(err); again(); }
+    }
+  };
+  $('#msStatus')?.addEventListener('change', (e) => setStatus(e.target.value));
+  $('#markDone')?.addEventListener('click', () => setStatus('done'));
+  $$('[data-step]', view).forEach((cb) => (cb.onchange = async () => {
+    try { await api('PATCH', `/api/steps/${cb.dataset.step}`, { done: cb.checked }); again(); } catch (err) { fail(err); again(); }
+  }));
+  $$('[data-delstep]', view).forEach((b) => (b.onclick = async () => {
+    if (!confirm('Remove this step from this site?')) return;
+    try { await api('DELETE', `/api/steps/${b.dataset.delstep}`); again(); } catch (err) { fail(err); }
+  }));
+  $('#addStep').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const label = $('#addStep input').value.trim(); if (!label) return;
+    try { await api('POST', `/api/projects/${p.id}/milestones/${m.id}/steps`, { label }); again(); } catch (err) { fail(err); }
+  });
+  $('#upBtn').onclick = async () => {
+    const files = $('#upFiles').files;
+    if (!files.length) { toast('Choose a file first', true); return; }
+    const fd = new FormData();
+    [...files].forEach((f) => fd.append('files', f));
+    fd.append('category', $('#upCat').value); fd.append('milestone_id', m.id);
+    $('#upBtn').disabled = true; $('#upBtn').textContent = 'Uploading…';
+    try { await api('POST', `/api/projects/${p.id}/documents`, fd); toast('Uploaded'); again(); } catch (err) { fail(err); $('#upBtn').disabled = false; $('#upBtn').textContent = 'Upload'; }
+  };
+  bindDocActions($('#msDocs'), again);
+  $('#msRemind').onclick = () => reminderModal(p, m.id, again);
+  bindReminderLines(view, again);
+  mountChat($('#msChat'), p, m.id).catch(() => {});
+}
+
 // ---------- dashboard ----------
 async function renderDashboard() {
   const d = await api('GET', '/api/dashboard');
@@ -791,7 +878,7 @@ async function renderDashboard() {
 }
 
 function activityItem(a) {
-  const icons = { reminder_set: '⏰', message: '💬', milestone_updated: '🏁', moved_to_pipeline: '✅', project_created: '🆕', stage_changed: '➡️', status_changed: '🚦', project_updated: '✏️', ticket_created: '🎫', ticket_updated: '🎫', ticket_deleted: '🗑️', documents_uploaded: '📎', document_deleted: '🗑️', note: '📝' };
+  const icons = { step_done: '✓', reminder_set: '⏰', message: '💬', milestone_updated: '🏁', moved_to_pipeline: '✅', project_created: '🆕', stage_changed: '➡️', status_changed: '🚦', project_updated: '✏️', ticket_created: '🎫', ticket_updated: '🎫', ticket_deleted: '🗑️', documents_uploaded: '📎', document_deleted: '🗑️', note: '📝' };
   const proj = a.project_name ? ` <a href="#/projects/${a.project_id}">${esc(a.code)}</a>` : '';
   const body = a.action === 'note' ? `<div class="note">${esc(a.detail)}</div>` : `<span>${esc(a.detail || '')}</span>`;
   return `<div class="feed-item">${icons[a.action] || '•'} <b>${esc(a.user_name || 'System')}</b> <span class="muted">${esc(label(a.action))}</span>${proj}
@@ -922,13 +1009,13 @@ async function renderPipeline() {
     return `<div class="prow ${cls} ${open ? 'open' : ''}">
       <button class="prow-main" type="button" data-row="${p.id}" aria-expanded="${open}">
         <span class="prow-addr"><b>${esc(line1)}</b><span class="muted small">${esc(line2)}</span></span>
-        ${msStrip(p, { chat: true })}
+        ${msStrip(p, { link: true })}
         <span class="prow-prog">${progressBadge(p)}</span>
         <span class="prow-extra small">${p.status !== 'active' ? statusBadge(p.status) : ''}${p.estimated_value ? `<span class="muted">${money(p.estimated_value)}</span>` : ''}</span>
         <span class="caret muted">${open ? '▾' : '▸'}</span>
       </button>
       ${open ? `<div class="prow-detail">
-        ${msEditor(p)}
+        ${msList(p)}
         <div class="prow-facts small">
           <span>${p.customer_name ? esc(p.customer_name) : '<span class="muted">No customer</span>'}</span>
           ${p.charger_count ? `<span>${p.charger_count}× ${esc(p.charger_type || 'ports')}</span>` : ''}
@@ -936,7 +1023,7 @@ async function renderPipeline() {
           ${p.open_tickets ? `<span>🎫 ${p.open_tickets} open</span>` : ''}
           ${p.hold_reason && p.status !== 'active' ? `<span style="color:var(--warn)">${esc(p.hold_reason)}</span>` : ''}
           ${p.rebates.map(rebateChip).join('')}
-          <button type="button" class="btn sm" data-sitechat="${p.id}">💬 Site chat${p.msg_count ? ` (${p.msg_count})` : ''}</button>
+          <button type="button" class="btn sm" data-sitechat="${p.id}">Site chat${p.msg_count ? ` (${p.msg_count})` : ''}</button>
           <a class="btn sm" href="#/projects/${p.id}">Open project →</a>
         </div>
       </div>` : ''}
@@ -971,7 +1058,7 @@ async function renderPipeline() {
       <button class="chip ${stateSel ? '' : 'active'}" data-state="">All states <span>${all.length}</span></button>
       ${keys.map((k) => `<button class="chip ${stateSel === k ? 'active' : ''}" data-state="${esc(k)}" title="${esc(stateName(k))}">${k === 'none' ? 'No state' : esc(k)} <span>${groups[k].length}</span></button>`).join('')}
     </div>
-    <p class="muted small">Milestones can be finished in any order. ✓ done · ● in progress · ○ not started · – not needed. Click a row to update its milestones. A red edge means a milestone is running past its target.</p>
+    <p class="muted small">Milestones can be finished in any order. ✓ done · ● in progress · ○ not started · – not needed. Click a milestone to open it, or a row to see all of them. A red edge means a milestone is running past its target.</p>
     ${shown.map(lane).join('') || `<div class="card empty">${stateSel ? 'No projects in this state.' : 'No projects match. Finish due diligence on a property to move it here.'}</div>`}`;
 
   const form = $('#pFilters');
@@ -996,7 +1083,7 @@ async function renderPipeline() {
     const id = Number(b.dataset.row); openRows.has(id) ? openRows.delete(id) : openRows.add(id); renderPipeline();
   }));
   const findP = (id) => all.find((x) => String(x.id) === String(id));
-  bindMsEditor(view, () => renderPipeline(), findP);
+  $$('[data-goto]', view).forEach((c) => (c.onclick = (e) => { e.stopPropagation(); location.hash = c.dataset.goto; }));
   $$('[data-sitechat]', view).forEach((b) => (b.onclick = () => openChat(findP(b.dataset.sitechat), null, () => renderPipeline())));
 }
 
@@ -1201,7 +1288,7 @@ async function mountChat(el, p, milestoneId, { onOpenMilestone, onChange } = {})
     <div class="chat-log" aria-live="polite"><div class="empty">Loading…</div></div>
     <form class="chat-form">
       ${canTag ? `<select name="milestone_id" aria-label="About">${options(S.meta.milestones.map((x) => [x.id, x.name]), '', { blank: 'General' })}</select>` : ''}
-      <textarea name="body" rows="2" required placeholder="${m ? `Message about ${esc(m.name)}… (also shows in the site chat)` : 'Message the team about this site… Type @ to mention someone.'}  Enter to send, Shift+Enter for a new line"></textarea>
+      <textarea name="body" rows="2" required placeholder="${m ? `Message about ${esc(m.name)}…` : 'Message the team… (type @ to mention someone)'}" title="Enter to send, Shift+Enter for a new line"></textarea>
       <button class="btn primary">Send</button>
     </form></div>`;
   const log = $('.chat-log', el); const form = $('.chat-form', el);
@@ -1244,19 +1331,19 @@ function openChat(p, milestoneId, after) {
   const m = milestoneId ? msById(milestoneId) : null;
   const x = m ? p.milestones?.find((y) => y.id === m.id) : null;
   const card = openModal(`<div class="modal-head"><div>
-      <h2 style="margin:0">${m ? `<span class="dot" style="background:${esc(m.color)}"></span> ${esc(m.name)} chat` : '💬 Site chat'}</h2>
+      <h2 style="margin:0">${m ? `<span class="dot" style="background:${esc(m.color)}"></span> ${esc(m.name)} chat` : 'Site chat'}</h2>
       <div class="muted small">${esc(p.address || p.name)} · ${esc(p.code)}${x ? ` · ${MS_ICON[x.status]} ${esc(MS_LABEL[x.status])}${msWhen(x) ? ` (${esc(msWhen(x))})` : ''}` : ''}</div></div>
       <button class="x" data-close aria-label="Close">×</button></div>
     <div id="chatMount"></div>
     <div class="muted small" style="margin-top:8px">${m ? 'Messages here also appear in the site chat. ' : ''}<a href="#/projects/${p.id}" id="toProject">Open the project page →</a></div>`,
   { wide: true, onClose: after });
   $('#toProject', card).onclick = () => { projectTab = 'chat'; };
-  mountChat($('#chatMount', card), p, milestoneId, { onOpenMilestone: (mid) => { modalClose = null; closeModal(); openChat(p, mid, after); } });
+  mountChat($('#chatMount', card), p, milestoneId, { onOpenMilestone: (mid) => { modalClose = null; closeModal(); location.hash = `#/projects/${p.id}/m/${mid}`; } });
 }
 
 async function tabChat(p) {
   await mountChat($('#tabBody'), p, null, {
-    onOpenMilestone: (mid) => openChat(p, mid, () => renderProject(p.id)),
+    onOpenMilestone: (mid) => { location.hash = `#/projects/${p.id}/m/${mid}`; },
   });
 }
 
@@ -1290,10 +1377,10 @@ async function renderProject(id) {
         return `<span class="chk ${ddHas(p, k) ? 'ok' : ''}">${ddHas(p, k) ? '✓' : '○'} ${esc(t)}${ddHas(p, k) ? `: <b>${esc(val)}</b>` : ''}</span>`;
       }).join('')}</div>
       <div class="small muted" style="margin-top:8px">${missing.length ? `Still needed: ${missing.map(([, t]) => esc(t)).join(', ')}. Click <b>Edit</b> to fill them in.` : 'All checks done. Click <b>Move to pipeline</b> to start tracking milestones.'}</div></div>`
-    : `<div class="card"><h2 style="margin-bottom:4px">Milestones <span class="muted small">— ${p.ms_complete ? 'all done, this site is live 🎉' : `${p.ms_done} of ${p.ms_total} done · finish them in any order`}</span></h2>${msEditor(p)}</div>`}
+    : `<div class="card"><div class="card-head"><h2>Milestones</h2><span class="muted small">${p.ms_complete ? 'All done. This site is live.' : `${p.ms_done} of ${p.ms_total} done · in any order`}</span></div>${msList(p)}</div>`}
     <div class="cols-main" style="margin-top:16px">
       <div>
-        <div class="tabs" style="margin-top:0">${['chat', 'tickets', 'documents', 'timeline', 'activity'].map((t) => `<button class="tab ${projectTab === t ? 'active' : ''}" data-tab="${t}">${t === 'chat' ? '💬 Chat' : label(t)}${t === 'chat' && p.msg_count ? ` (${p.msg_count})` : ''}${t === 'tickets' && p.open_tickets ? ` (${p.open_tickets})` : ''}${t === 'documents' && p.doc_count ? ` (${p.doc_count})` : ''}</button>`).join('')}</div>
+        <div class="tabs" style="margin-top:0">${['chat', 'tickets', 'documents', 'timeline', 'activity'].map((t) => `<button class="tab ${projectTab === t ? 'active' : ''}" data-tab="${t}">${label(t)}${t === 'chat' && p.msg_count ? ` (${p.msg_count})` : ''}${t === 'tickets' && p.open_tickets ? ` (${p.open_tickets})` : ''}${t === 'documents' && p.doc_count ? ` (${p.doc_count})` : ''}</button>`).join('')}</div>
         <div id="tabBody"></div>
       </div>
       <div class="grid" style="gap:16px">
@@ -1329,7 +1416,6 @@ async function renderProject(id) {
 
   $('#editProject').onclick = () => projectForm(p);
   $('#promote')?.addEventListener('click', () => promoteModal(p, route));
-  bindMsEditor(view, () => route(), () => p);
   bindRebateChips();
   projectRemindersCard(p, $('#remCard')).catch(() => {});
   $('#quickStatus').onchange = async (e) => {
@@ -1456,7 +1542,7 @@ function docList(docs, showTicket = false) {
     const previewable = /^(image\/(png|jpe?g|gif|webp)|application\/pdf|text\/plain)$/.test(d.mime || '');
     return `<tr><td><div class="file-icon">${esc(ext)}</div></td>
       <td><b>${esc(d.original_name)}</b>${d.notes ? `<div class="muted small">${esc(d.notes)}</div>` : ''}</td>
-      <td>${badge('', label(d.category))}</td>
+      <td>${badge('', label(d.category))}${d.milestone_name ? `<div class="muted small">${esc(d.milestone_name)}</div>` : ''}</td>
       ${showTicket ? `<td>${d.ticket_id ? `<a href="#/tickets/${d.ticket_id}">#${d.ticket_id}</a>` : '—'}</td>` : ''}
       <td class="muted small">${fsize(d.size || 0)}</td>
       <td class="small">${esc(d.uploader_name || '—')}<div class="muted">${fdate(d.uploaded_at)}</div></td>
@@ -1586,13 +1672,14 @@ async function renderAdmin() {
       <input value="${esc(m.name)}" data-k="name" placeholder="Milestone name" aria-label="Name">
       <input type="number" min="1" value="${esc(m.sla_days)}" data-k="sla_days" aria-label="Target days">
       <select data-k="required_docs" aria-label="Needs document">${options(S.meta.enums.docCategory, String(m.required_docs || '').split(',')[0], { blank: 'Nothing' })}</select>
-      <span style="display:flex;gap:2px"><button class="btn sm" data-mv="-1" title="Move up">↑</button><button class="btn sm" data-mv="1" title="Move down">↓</button></span>
+      <span style="display:flex;gap:2px">${m.id ? `<button class="btn sm" data-steps="${m.id}" title="Default steps">Steps</button>` : ''}<button class="btn sm" data-mv="-1" title="Move up">↑</button><button class="btn sm" data-mv="1" title="Move down">↓</button></span>
       <button class="btn sm danger" data-rm title="Remove">✕</button></div>`).join('');
     $$('#msList [data-i]').forEach((row) => {
       const i = Number(row.dataset.i);
       $$('[data-k]', row).forEach((inp) => inp.addEventListener('input', () => { list[i][inp.dataset.k] = inp.value; }));
       $$('[data-mv]', row).forEach((b) => (b.onclick = () => { const j = i + Number(b.dataset.mv); if (j < 0 || j >= list.length) return; [list[i], list[j]] = [list[j], list[i]]; draw(); }));
       $('[data-rm]', row).onclick = () => { list.splice(i, 1); draw(); };
+      $('[data-steps]', row)?.addEventListener('click', () => stepsTemplateModal(list[i]));
     });
   };
   draw();
@@ -1604,6 +1691,20 @@ async function renderAdmin() {
   };
   $('#addUser').onclick = () => userForm();
   $$('[data-edituser]').forEach((b) => (b.onclick = () => userForm(users.find((u) => String(u.id) === b.dataset.edituser))));
+}
+
+// the checklist every new site starts with for this milestone
+async function stepsTemplateModal(m) {
+  const steps = await api('GET', `/api/milestones/${m.id}/steps`);
+  const card = openModal(`${modalHead(`${esc(m.name)}: default steps`)}
+    <p class="muted small" style="margin-top:-6px">One step per line. Sites that haven't opened ${esc(m.name)} yet will start with these; sites already working on it keep their own list.</p>
+    <form class="grid"><textarea name="steps" rows="12">${esc(steps.map((x) => x.label).join('\n'))}</textarea>
+      <div class="modal-foot"><button type="button" class="btn" data-close>Cancel</button><button class="btn primary">Save steps</button></div></form>`);
+  $('form', card).addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const lines = $('textarea', card).value.split('\n').map((x) => x.trim()).filter(Boolean);
+    try { await api('PUT', `/api/milestones/${m.id}/steps`, lines); closeModal(); toast('Steps saved'); } catch (err) { fail(err); }
+  });
 }
 
 function userForm(u = null) {

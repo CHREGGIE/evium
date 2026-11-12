@@ -18,7 +18,7 @@ const ENUMS = {
   priority: ['low', 'medium', 'high', 'urgent'],
   ticketStatus: ['open', 'in_progress', 'waiting', 'resolved', 'closed'],
   ticketType: ['task', 'issue', 'site_survey', 'permit', 'utility', 'installation', 'commissioning', 'maintenance', 'billing', 'other'],
-  docCategory: ['contract', 'proposal', 'site_plan', 'photo', 'permit', 'utility', 'engineering', 'invoice', 'commissioning', 'other'],
+  docCategory: ['contract', 'proposal', 'electrical_quote', 'site_plan', 'photo', 'permit', 'utility', 'engineering', 'invoice', 'commissioning', 'other'],
   siteType: ['retail', 'workplace', 'multifamily', 'hospitality', 'fleet', 'municipal', 'parking', 'fuel_station', 'other'],
   chargerType: ['L2', 'DCFC', 'L2 + DCFC'],
 };
@@ -149,9 +149,15 @@ function attachMilestones(list) {
   if (!list.length) return list;
   const ms = getMilestones();
   const ids = list.map((p) => p.id);
-  const by = {}; const msgs = {}; const rebs = {}; const docs = {};
+  const by = {}; const msgs = {}; const rebs = {}; const docs = {}; const steps = {}; const msDocs = {};
+  const tmpl = {};
+  db.prepare('SELECT milestone_id, COUNT(*) c FROM milestone_steps GROUP BY milestone_id').all().forEach((r) => (tmpl[r.milestone_id] = r.c));
   for (let i = 0; i < ids.length; i += 500) {
     const chunk = ids.slice(i, i + 500); const qs = chunk.map(() => '?').join(',');
+    db.prepare(`SELECT project_id, milestone_id, COUNT(*) total, COUNT(done_at) done FROM project_steps WHERE project_id IN (${qs}) GROUP BY project_id, milestone_id`).all(...chunk)
+      .forEach((r) => ((steps[r.project_id] ||= {})[r.milestone_id] = r));
+    db.prepare(`SELECT project_id, milestone_id, COUNT(*) c FROM documents WHERE milestone_id IS NOT NULL AND project_id IN (${qs}) GROUP BY project_id, milestone_id`).all(...chunk)
+      .forEach((r) => ((msDocs[r.project_id] ||= {})[r.milestone_id] = r.c));
     db.prepare(`SELECT pr.project_id, r.id, r.name, r.state, r.kind, r.status, r.amount_text, r.max_amount, r.deadline, r.verified FROM project_rebates pr
       JOIN rebates r ON r.id = pr.rebate_id WHERE pr.project_id IN (${qs}) ORDER BY pr.position, r.name`).all(...chunk)
       .forEach(({ project_id: pid, ...r }) => (rebs[pid] ||= []).push(r));
@@ -175,7 +181,11 @@ function attachMilestones(list) {
       const status = r?.status || 'not_started';
       const days = status === 'in_progress' && r.started_at ? Math.max(0, Math.floor((t - parseTs(r.started_at)) / 864e5)) : null;
       return { id: m.id, status, started_at: r?.started_at || null, completed_at: r?.completed_at || null, days_open: days, sla_days: m.sla_days, overdue: days != null && days > m.sla_days, msg_count: counts[m.id] || 0,
-        docs_missing: status === 'done' || status === 'not_needed' ? [] : requiredDocs(m).filter((c) => !haveDocs.has(c)) };
+        docs_missing: status === 'done' || status === 'not_needed' ? [] : requiredDocs(m).filter((c) => !haveDocs.has(c)),
+        // steps not copied to this project yet: count the defaults (all ticked if the milestone is already done)
+        steps_total: steps[p.id]?.[m.id]?.total ?? (tmpl[m.id] || 0),
+        steps_done: steps[p.id]?.[m.id]?.done ?? (status === 'done' ? (tmpl[m.id] || 0) : 0),
+        doc_count: msDocs[p.id]?.[m.id] || 0 };
     });
     const needed = p.milestones.filter((x) => x.status !== 'not_needed');
     p.ms_done = needed.filter((x) => x.status === 'done').length;
@@ -238,6 +248,99 @@ app.put('/api/projects/:id/milestones/:mid', wrap((req, res) => {
     }
   })();
   res.json(getProject(p.id));
+}));
+
+// ---------- milestone pages: steps ----------
+// A project's own copy of a milestone's steps, created from the Admin defaults the first time it's needed.
+function ensureSteps(projectId, milestoneId) {
+  if (db.prepare('SELECT 1 FROM project_steps WHERE project_id = ? AND milestone_id = ?').get(projectId, milestoneId)) return;
+  const st = db.prepare('SELECT status, completed_at FROM project_milestones WHERE project_id = ? AND milestone_id = ?').get(projectId, milestoneId);
+  const doneAt = st?.status === 'done' ? (st.completed_at || now()) : null; // a milestone already done starts with every step ticked
+  const ins = db.prepare('INSERT INTO project_steps (project_id, milestone_id, label, position, done_at) VALUES (?,?,?,?,?)');
+  db.prepare('SELECT label, position FROM milestone_steps WHERE milestone_id = ? ORDER BY position, id').all(milestoneId)
+    .forEach((s) => ins.run(projectId, milestoneId, s.label, s.position, doneAt));
+}
+const stepsFor = (projectId, milestoneId) => db.prepare(`SELECT s.*, u.name AS done_by_name FROM project_steps s
+  LEFT JOIN users u ON u.id = s.done_by WHERE s.project_id = ? AND s.milestone_id = ? ORDER BY s.position, s.id`).all(projectId, milestoneId);
+
+app.get('/api/projects/:id/milestones/:mid', wrap((req, res) => {
+  const p = getProject(req.params.id) || notFound('Project not found');
+  const m = db.prepare('SELECT * FROM milestones WHERE id = ?').get(req.params.mid) || notFound('Milestone not found');
+  db.transaction(() => ensureSteps(p.id, m.id))();
+  const all = getMilestones();
+  const i = all.findIndex((x) => x.id === m.id);
+  res.json({
+    project: p,
+    milestone: { ...m, required: requiredDocs(m) },
+    state: p.milestones.find((x) => x.id === m.id),
+    steps: stepsFor(p.id, m.id),
+    documents: db.prepare(`SELECT d.*, u.name AS uploader_name FROM documents d LEFT JOIN users u ON u.id = d.uploaded_by
+      WHERE d.project_id = ? AND d.milestone_id = ? ORDER BY d.id DESC`).all(p.id, m.id),
+    otherDocs: db.prepare(`SELECT d.category, COUNT(*) c FROM documents d WHERE d.project_id = ? AND (d.milestone_id IS NULL OR d.milestone_id <> ?) GROUP BY d.category`).all(p.id, m.id),
+    reminders: db.prepare(`${REMINDER_SELECT} WHERE r.project_id = ? AND r.milestone_id = ? AND r.done_at IS NULL ORDER BY r.due_on`).all(p.id, m.id),
+    prev: all[i - 1] || null,
+    next: all[i + 1] || null,
+  });
+}));
+
+app.post('/api/projects/:id/milestones/:mid/steps', wrap((req, res) => {
+  const p = db.prepare('SELECT id FROM projects WHERE id = ?').get(req.params.id) || notFound('Project not found');
+  const m = db.prepare('SELECT id, name FROM milestones WHERE id = ?').get(req.params.mid) || notFound('Milestone not found');
+  const label = String(req.body?.label || '').trim();
+  if (!label) bad('Step name is required');
+  db.transaction(() => {
+    ensureSteps(p.id, m.id);
+    const pos = db.prepare('SELECT COALESCE(MAX(position), -1) + 1 n FROM project_steps WHERE project_id = ? AND milestone_id = ?').get(p.id, m.id).n;
+    db.prepare('INSERT INTO project_steps (project_id, milestone_id, label, position) VALUES (?,?,?,?)').run(p.id, m.id, label.slice(0, 300), pos);
+  })();
+  res.status(201).json(stepsFor(p.id, m.id));
+}));
+
+app.patch('/api/steps/:id', wrap((req, res) => {
+  const s = db.prepare('SELECT * FROM project_steps WHERE id = ?').get(req.params.id) || notFound('Step not found');
+  const m = db.prepare('SELECT * FROM milestones WHERE id = ?').get(s.milestone_id);
+  db.transaction(() => {
+    if ('label' in (req.body || {})) {
+      const label = String(req.body.label || '').trim(); if (!label) bad('Step name is required');
+      db.prepare('UPDATE project_steps SET label = ? WHERE id = ?').run(label.slice(0, 300), s.id);
+    }
+    if ('done' in (req.body || {})) {
+      const t = now();
+      if (req.body.done && !s.done_at) {
+        db.prepare('UPDATE project_steps SET done_at = ?, done_by = ? WHERE id = ?').run(t, req.user.id, s.id);
+        logActivity(s.project_id, req.user.id, 'step_done', `${m.name}: ${s.label}`);
+        // first step ticked on a milestone that hasn't started: it's now in progress
+        const cur = db.prepare('SELECT status FROM project_milestones WHERE project_id = ? AND milestone_id = ?').get(s.project_id, m.id)?.status || 'not_started';
+        const p = db.prepare('SELECT phase FROM projects WHERE id = ?').get(s.project_id);
+        if (cur === 'not_started' && p.phase === 'pipeline') setMilestone(s.project_id, m, 'in_progress', req.user.id, null, t);
+      } else if (!req.body.done && s.done_at) {
+        db.prepare('UPDATE project_steps SET done_at = NULL, done_by = NULL WHERE id = ?').run(s.id);
+      }
+      db.prepare('UPDATE projects SET updated_at = ? WHERE id = ?').run(t, s.project_id);
+    }
+  })();
+  res.json(stepsFor(s.project_id, s.milestone_id));
+}));
+
+app.delete('/api/steps/:id', wrap((req, res) => {
+  const s = db.prepare('SELECT * FROM project_steps WHERE id = ?').get(req.params.id) || notFound('Step not found');
+  db.prepare('DELETE FROM project_steps WHERE id = ?').run(s.id);
+  res.json(stepsFor(s.project_id, s.milestone_id));
+}));
+
+// Admin: the default steps for a milestone (used for projects that haven't opened it yet)
+app.get('/api/milestones/:id/steps', (req, res) => {
+  res.json(db.prepare('SELECT * FROM milestone_steps WHERE milestone_id = ? ORDER BY position, id').all(req.params.id));
+});
+app.put('/api/milestones/:id/steps', requireAdmin, wrap((req, res) => {
+  const m = db.prepare('SELECT id FROM milestones WHERE id = ?').get(req.params.id) || notFound('Milestone not found');
+  const labels = (Array.isArray(req.body) ? req.body : []).map((x) => String(x || '').trim()).filter(Boolean).slice(0, 50);
+  db.transaction(() => {
+    db.prepare('DELETE FROM milestone_steps WHERE milestone_id = ?').run(m.id);
+    const ins = db.prepare('INSERT INTO milestone_steps (milestone_id, label, position) VALUES (?,?,?)');
+    labels.forEach((l, i) => ins.run(m.id, l.slice(0, 300), i));
+  })();
+  res.json(db.prepare('SELECT * FROM milestone_steps WHERE milestone_id = ? ORDER BY position').all(m.id));
 }));
 
 // ---------- dashboard ----------
@@ -875,8 +978,8 @@ const upload = multer({
 });
 
 app.get('/api/projects/:id/documents', (req, res) => {
-  res.json(db.prepare(`SELECT d.*, u.name AS uploader_name FROM documents d LEFT JOIN users u ON u.id = d.uploaded_by
-    WHERE d.project_id = ? ORDER BY d.id DESC`).all(req.params.id));
+  res.json(db.prepare(`SELECT d.*, u.name AS uploader_name, m.name AS milestone_name FROM documents d LEFT JOIN users u ON u.id = d.uploaded_by
+    LEFT JOIN milestones m ON m.id = d.milestone_id WHERE d.project_id = ? ORDER BY d.id DESC`).all(req.params.id));
 });
 
 app.post('/api/projects/:id/documents', upload.array('files'), wrap((req, res) => {
@@ -888,12 +991,14 @@ app.post('/api/projects/:id/documents', upload.array('files'), wrap((req, res) =
   const category = ENUMS.docCategory.includes(req.body.category) ? req.body.category : 'other';
   let ticketId = req.body.ticket_id ? Number(req.body.ticket_id) : null;
   if (ticketId && !db.prepare('SELECT 1 FROM tickets WHERE id = ? AND project_id = ?').get(ticketId, p.id)) ticketId = null;
-  const ins = db.prepare(`INSERT INTO documents (project_id, ticket_id, category, original_name, stored_name, mime, size, notes, uploaded_by)
-    VALUES (?,?,?,?,?,?,?,?,?)`);
+  let milestoneId = req.body.milestone_id ? Number(req.body.milestone_id) : null;
+  if (milestoneId && !db.prepare('SELECT 1 FROM milestones WHERE id = ?').get(milestoneId)) milestoneId = null;
+  const ins = db.prepare(`INSERT INTO documents (project_id, ticket_id, milestone_id, category, original_name, stored_name, mime, size, notes, uploaded_by)
+    VALUES (?,?,?,?,?,?,?,?,?,?)`);
   db.transaction(() => files.forEach((f) => {
     // multer gives latin1-decoded names; restore UTF-8
     const name = Buffer.from(f.originalname, 'latin1').toString('utf8');
-    ins.run(p.id, ticketId, category, name, f.filename, f.mimetype, f.size, req.body.notes || null, req.user.id);
+    ins.run(p.id, ticketId, milestoneId, category, name, f.filename, f.mimetype, f.size, req.body.notes || null, req.user.id);
   }))();
   logActivity(p.id, req.user.id, 'documents_uploaded', `${files.length} file(s) · ${category}${ticketId ? ` · ticket #${ticketId}` : ''}`);
   db.prepare('UPDATE projects SET updated_at = ? WHERE id = ?').run(now(), p.id);

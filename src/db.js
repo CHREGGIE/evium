@@ -372,6 +372,45 @@ if (addColumns('milestones', { required_docs: 'TEXT' }).length) {
   Object.entries(DEFAULT_DOCS).forEach(([name, cat]) => upd.run(cat, name));
 }
 
+// ---------- milestone steps ----------
+// Each milestone has a default checklist of steps (edited in Admin). A project gets its own copy
+// the first time that milestone is opened, so a site can add or remove steps without affecting others.
+db.exec(`
+CREATE TABLE IF NOT EXISTS milestone_steps (
+  id INTEGER PRIMARY KEY,
+  milestone_id INTEGER NOT NULL REFERENCES milestones(id) ON DELETE CASCADE,
+  label TEXT NOT NULL,
+  position INTEGER NOT NULL DEFAULT 0
+);
+CREATE TABLE IF NOT EXISTS project_steps (
+  id INTEGER PRIMARY KEY,
+  project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  milestone_id INTEGER NOT NULL REFERENCES milestones(id) ON DELETE CASCADE,
+  label TEXT NOT NULL,
+  position INTEGER NOT NULL DEFAULT 0,
+  done_at TEXT,
+  done_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_psteps ON project_steps(project_id, milestone_id, position);
+`);
+addColumns('documents', { milestone_id: 'INTEGER REFERENCES milestones(id) ON DELETE SET NULL' });
+
+const DEFAULT_STEPS = {
+  'Site walk': ['Schedule the site walk with the owner', 'Photos of the parking area', 'Photos of the electrical room and panel',
+    'Note panel size and spare capacity', 'Measure distance from panel to charger spots', 'Locate transformer and meter', 'Write up site walk notes'],
+  'Proposal': ['Draft charger layout', 'Get electrical quote', 'Confirm rebate amount', 'Price the proposal', 'Send proposal to customer', 'Customer feedback / revisions'],
+  'Contract': ['Draft contract', 'Agree terms with customer', 'Customer signs', 'Evium countersigns', 'Deposit received'],
+  'Permitting': ['Electrical drawings / single-line diagram', 'Load calculation', 'Submit permit application', 'Answer plan review comments', 'Permit approved'],
+  'Approvals': ['Submit utility application', 'Utility approval and energization date', 'Property owner / landlord approval', 'Submit rebate application', 'Rebate pre-approval received'],
+  'Installation': ['Order equipment', 'Schedule electrician', 'Trenching and conduit', 'Mount and wire chargers', 'Pass inspection', 'Commission chargers on the network', 'Customer walkthrough and handoff'],
+};
+if (db.prepare('SELECT COUNT(*) c FROM milestone_steps').get().c === 0) {
+  const ins = db.prepare('INSERT INTO milestone_steps (milestone_id, label, position) VALUES (?,?,?)');
+  db.transaction(() => db.prepare('SELECT id, name FROM milestones').all()
+    .forEach((m) => (DEFAULT_STEPS[m.name] || []).forEach((label, i) => ins.run(m.id, label, i))))();
+}
+
 // One-time: turn the typed-in utility names on existing sites into directory entries
 {
   const loose = db.prepare("SELECT id, utility_company, state FROM projects WHERE utility_id IS NULL AND TRIM(COALESCE(utility_company,'')) <> ''").all();

@@ -183,6 +183,14 @@ if (seedPipeline) db.transaction(() => {
     [...code].forEach((c, mi) => {
       const st = CODE[c]; if (!st) return;
       const m = milestones[mi]; if (!m) return;
+      // copy the milestone's steps: all ticked when done, about half ticked when in progress
+      const tmpl = db.prepare('SELECT label, position FROM milestone_steps WHERE milestone_id = ? ORDER BY position').all(m.id);
+      if (st !== 'not_needed') {
+        const ticked = st === 'done' ? tmpl.length : Math.floor(tmpl.length / 2);
+        tmpl.forEach((s, si) => db.prepare(`INSERT INTO project_steps (project_id, milestone_id, label, position, done_at, done_by)
+          VALUES (?,?,?,?, ${si < ticked ? `datetime('now', '-${Math.max(1, daysIn - si)} days')` : 'NULL'}, ?)`)
+          .run(pid, m.id, s.label, s.position, si < ticked ? owner : null));
+      }
       if (st === 'done') {
         const startAgo = createdDaysAgo - 3 - k * 8; const endAgo = Math.max(daysIn + 1, startAgo - 7); k++;
         insM.run(pid, m.id, st, `-${startAgo} days`, `-${endAgo} days`, `-${endAgo} days`);
