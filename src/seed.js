@@ -25,6 +25,8 @@ const userIds = staff.map(([name, email, role, states]) => {
   return db.prepare('INSERT INTO users (name, email, password_hash, role, states) VALUES (?,?,?,?,?)').run(name, email, hashPassword('changeme123'), role, states).lastInsertRowid;
 });
 const admin = db.prepare("SELECT id FROM users WHERE role = 'admin' ORDER BY id LIMIT 1").get()?.id || userIds[0];
+const jojo = db.prepare('SELECT id FROM users WHERE email = ?').get('jojo@eviumcharging.com')?.id
+  ?? db.prepare("INSERT INTO users (name, email, password_hash, role, can_review) VALUES ('JoJo', 'jojo@eviumcharging.com', ?, 'staff', 1)").run(hashPassword('changeme123')).lastInsertRowid;
 
 // ---------- utility directory (sample entries: add your own contacts) ----------
 const UTILITIES = [
@@ -139,14 +141,22 @@ const projects = [
   ['Atlantic Commons Shopping Center', 'Atlantic Commons Retail', 'Marco Silva', 'msilva@atlanticcommons.example', '555-0113', '550 Atlantic Ave', 'Brooklyn', 'NY', '11217', 'retail', 'L2 + DCFC', 12, 480, 365000, 'DI----', 'active', 'medium', 6, 40.6846, -73.9776, 'Con Edison', ['nyConEd', 'nyCRNY']],
 ];
 
-// Properties still in due diligence:
-// [name, address, city, state, zip, site type, property owner, owner contact, typed rebate, rebate $, utility, days ago, lat, lng, rebates]
+// Properties in due diligence:
+// [name, address, city, state, zip, site type, property owner, owner contact, typed rebate, rebate $, utility, days ago, lat, lng, rebates,
+//  stage (new / review / passed), rating, insight, reviewer note]
 const diligence = [
-  ['Lakeview Retail Center', '3100 N Clark St', 'Chicago', 'IL', '60657', 'retail', 'Lakeview Holdings LLC', '312-555-0140', null, 45000, 'ComEd', 5, 41.9390, -87.6447, ['ilComEd']],
-  ['Harborside Apartments', '200 Hudson St', 'Jersey City', 'NJ', '07311', 'multifamily', 'Harborside Residential', 'leasing@harborside.example', null, null, 'PSE&G', 3, 40.7178, -74.0335, []],
-  ['Sacramento Logistics Yard', '4800 Power Inn Rd', 'Sacramento', 'CA', '95826', 'fleet', null, null, 'HVIP + SMUD fleet electrification', 250000, 'SMUD', 9, 38.5371, -121.4171, []],
-  ['Hill Country Inn', '250 Main St', 'Fredericksburg', 'TX', '78624', 'hospitality', 'Hill Country Hospitality', '830-555-0177', 'None', null, 'Central Texas Electric Co-op', 12, 30.2752, -98.8720, []],
-  ['Shoreline Medical Plaza', '150 Boston Post Rd', 'Milford', 'CT', '06460', 'workplace', 'Shoreline Properties', '203-555-0190', null, 30000, 'United Illuminating', 7, 41.2223, -73.0565, ['ctEVCP']],
+  ['Lakeview Retail Center', '3100 N Clark St', 'Chicago', 'IL', '60657', 'retail', 'Lakeview Holdings LLC', '312-555-0140', null, 45000, 'ComEd', 5, 41.9390, -87.6447, ['ilComEd'],
+    'review', 4, 'Busy Clark St corridor with steady evening traffic. 60-space surface lot and a 400A service with room to spare. Owner already asked about chargers for tenants. ComEd make-ready should cover most of the electrical work. Only concern is the lot gets tight on weekends.', null],
+  ['Shoreline Medical Plaza', '150 Boston Post Rd', 'Milford', 'CT', '06460', 'workplace', 'Shoreline Properties', '203-555-0190', null, 30000, 'United Illuminating', 7, 41.2223, -73.0565, ['ctEVCP'],
+    'review', 5, 'Medical office with 200+ staff and patients parked 1–3 hours: ideal dwell time for Level 2. New switchgear installed last year. Owner is motivated (ESG reporting) and CT EVCP fits well. Strong candidate for 12–16 ports.', null],
+  ['Harborside Apartments', '200 Hudson St', 'Jersey City', 'NJ', '07311', 'multifamily', 'Harborside Residential', 'leasing@harborside.example', null, null, 'PSE&G', 3, 40.7178, -74.0335, [],
+    'new', null, null, null],
+  ['Riverbend Business Park', '2400 Commerce Dr', 'Plano', 'TX', '75074', 'workplace', 'Riverbend Partners', '972-555-0133', null, null, 'Oncor', 1, 33.0198, -96.6989, [],
+    'new', null, null, null],
+  ['Sacramento Logistics Yard', '4800 Power Inn Rd', 'Sacramento', 'CA', '95826', 'fleet', null, null, 'HVIP + SMUD fleet electrification', 250000, 'SMUD', 9, 38.5371, -121.4171, [],
+    'new', 3, 'Big fleet opportunity, but we still don\'t know who owns the yard versus the operator.', 'Find out who owns the yard and whether SMUD has capacity for DC fast before we go further.'],
+  ['Hill Country Inn', '250 Main St', 'Fredericksburg', 'TX', '78624', 'hospitality', 'Hill Country Hospitality', '830-555-0177', 'None', null, 'Central Texas Electric Co-op', 12, 30.2752, -98.8720, [],
+    'passed', 2, 'Small inn with 18 spaces and an old 200A panel. Little traffic outside weekends and no rebate in this co-op territory.', 'Too small and no rebate to make the numbers work. Revisit if the co-op launches a program.'],
 ];
 
 const insP = db.prepare(`INSERT INTO projects (name, customer_name, contact_name, contact_email, contact_phone, address, city, state, zip, site_type,
@@ -248,13 +258,16 @@ if (seedPipeline) db.transaction(() => {
 })();
 
 const insD = db.prepare(`INSERT INTO projects (name, address, city, state, zip, site_type, property_owner, property_owner_contact, rebate_program,
-  rebate_amount, utility_company, utility_id, lat, lng, geocoded_at, phase, status, priority, owner_id, stage_entered_at, created_at)
-  VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?, datetime('now'), 'diligence', 'active', 'medium', ?, datetime('now', ?), datetime('now', ?))`);
+  rebate_amount, utility_company, utility_id, lat, lng, geocoded_at, phase, status, priority, owner_id, stage_entered_at, created_at,
+  dd_stage, dd_rating, dd_insight, dd_assessed_by, dd_assessed_at, dd_review_note, dd_reviewed_by, dd_reviewed_at)
+  VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?, datetime('now'), 'diligence', 'active', 'medium', ?, datetime('now', ?), datetime('now', ?),
+  ?, ?, ?, ?, datetime('now', '-1 days'), ?, ?, CASE WHEN ? IS NULL THEN NULL ELSE datetime('now', '-1 days') END)`);
 if (seedDiligence) db.transaction(() => {
   diligence.forEach((d, i) => {
-    const [name, addr, city, state, zip, site, owner, contact, rebate, rebateAmt, utility, daysAgo, lat, lng, rebates] = d;
+    const [name, addr, city, state, zip, site, owner, contact, rebate, rebateAmt, utility, daysAgo, lat, lng, rebates, stage, rating, insight, note] = d;
     const who = ownerFor(state, i);
-    const pid = insD.run(name, addr, city, state, zip, site, owner, contact, rebate, rebateAmt, utility, utilId[utility] ?? null, lat, lng, who, `-${daysAgo} days`, `-${daysAgo} days`).lastInsertRowid;
+    const pid = insD.run(name, addr, city, state, zip, site, owner, contact, rebate, rebateAmt, utility, utilId[utility] ?? null, lat, lng, who, `-${daysAgo} days`, `-${daysAgo} days`,
+      stage, rating, insight, rating ? admin : null, note, note ? jojo : null, note).lastInsertRowid;
     db.prepare('UPDATE projects SET code = ? WHERE id = ?').run(`EV-${String(pid).padStart(4, '0')}`, pid);
     linkRebates(pid, rebates);
     insA.run(pid, who, 'project_created', `${name} (added to due diligence)`);

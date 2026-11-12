@@ -372,6 +372,22 @@ if (addColumns('milestones', { required_docs: 'TEXT' }).length) {
   Object.entries(DEFAULT_DOCS).forEach(([name, cat]) => upd.run(cat, name));
 }
 
+// ---------- due diligence: assess (1–5 + insight) → 10:30 review → approve to site walk ----------
+// dd_stage: new (to assess) · review (rated, waiting for the 10:30 review) · approved · passed
+addColumns('projects', {
+  dd_stage: "TEXT NOT NULL DEFAULT 'new'",
+  dd_rating: 'INTEGER',
+  dd_insight: 'TEXT',
+  dd_assessed_by: 'INTEGER REFERENCES users(id) ON DELETE SET NULL',
+  dd_assessed_at: 'TEXT',
+  dd_review_note: 'TEXT',      // the reviewer's note: walk instructions, what's missing, or why it was passed
+  dd_reviewed_by: 'INTEGER REFERENCES users(id) ON DELETE SET NULL',
+  dd_reviewed_at: 'TEXT',
+});
+db.exec("UPDATE projects SET dd_stage = 'approved' WHERE phase = 'pipeline' AND dd_stage = 'new'");
+// who can approve or pass sites in the 10:30 review (admins always can)
+addColumns('users', { can_review: 'INTEGER NOT NULL DEFAULT 0' });
+
 // ---------- milestone steps ----------
 // Each milestone has a default checklist of steps (edited in Admin). A project gets its own copy
 // the first time that milestone is opened, so a site can add or remove steps without affecting others.

@@ -65,7 +65,7 @@ function setSessionCookie(req, res, token, maxAgeSec) {
 function loadUser(req, _res, next) {
   const token = parseCookies(req)[COOKIE];
   if (token) {
-    const row = db.prepare(`SELECT u.id, u.name, u.email, u.role, u.states FROM sessions s JOIN users u ON u.id = s.user_id
+    const row = db.prepare(`SELECT u.id, u.name, u.email, u.role, u.states, u.can_review FROM sessions s JOIN users u ON u.id = s.user_id
       WHERE s.token = ? AND s.expires_at > datetime('now') AND u.active = 1`).get(token);
     if (row) { req.user = row; req.sessionToken = token; }
   }
@@ -132,7 +132,7 @@ const getMilestones = () => db.prepare('SELECT * FROM milestones ORDER BY positi
 app.get('/api/meta', (req, res) => {
   res.json({
     milestones: getMilestones(),
-    users: db.prepare('SELECT id, name, email, role, active, states FROM users ORDER BY name').all(),
+    users: db.prepare('SELECT id, name, email, role, active, states, can_review FROM users ORDER BY name').all(),
     utilities: db.prepare('SELECT id, name, states FROM utilities ORDER BY name').all(),
     rebates: db.prepare('SELECT id, name, state, kind, status, amount_text, provider FROM rebates ORDER BY state, name').all(),
     statesInUse: db.prepare("SELECT DISTINCT state FROM projects WHERE state IS NOT NULL AND state <> '' UNION SELECT DISTINCT state FROM rebates WHERE state <> 'US'").all().map((r) => r.state).sort(),
@@ -353,7 +353,9 @@ app.get('/api/dashboard', (req, res) => {
     return { ...m, ...c };
   });
   const totals = db.prepare(`SELECT
-      COUNT(*) FILTER (WHERE phase = 'diligence' AND status IN ${OPEN}) AS in_diligence,
+      COUNT(*) FILTER (WHERE phase = 'diligence' AND dd_stage <> 'passed' AND status IN ${OPEN}) AS in_diligence,
+      COUNT(*) FILTER (WHERE phase = 'diligence' AND dd_stage = 'new' AND status IN ${OPEN}) AS to_assess,
+      COUNT(*) FILTER (WHERE phase = 'diligence' AND dd_stage = 'review' AND status IN ${OPEN}) AS to_review,
       COUNT(*) FILTER (WHERE status = 'on_hold') AS on_hold,
       COUNT(*) FILTER (WHERE status = 'blocked') AS blocked
     FROM projects`).get();
@@ -399,11 +401,11 @@ const diligenceMissing = (p) => Object.entries(DILIGENCE_REQUIRED).filter(([k]) 
 }).map(([, v]) => v);
 
 // days_in_phase = days in due diligence, or days since entering the pipeline
-const PROJECT_SELECT = `SELECT p.*, u.name AS owner_name,
+const PROJECT_SELECT = `SELECT p.*, u.name AS owner_name, ua.name AS assessed_by_name, ur.name AS reviewed_by_name,
     CAST(julianday('now') - julianday(p.stage_entered_at) AS INTEGER) AS days_in_phase,
     (SELECT COUNT(*) FROM tickets t WHERE t.project_id = p.id AND t.status NOT IN ('resolved','closed')) AS open_tickets,
     (SELECT COUNT(*) FROM documents d WHERE d.project_id = p.id) AS doc_count
-  FROM projects p LEFT JOIN users u ON u.id = p.owner_id`;
+  FROM projects p LEFT JOIN users u ON u.id = p.owner_id LEFT JOIN users ua ON ua.id = p.dd_assessed_by LEFT JOIN users ur ON ur.id = p.dd_reviewed_by`;
 
 function validateProject(data) {
   if (data.status && !ENUMS.projectStatus.includes(data.status)) bad('Invalid status');
@@ -439,8 +441,9 @@ const ADDRESS_FIELDS = ['address', 'city', 'state', 'zip'];
 
 app.get('/api/projects', (req, res) => {
   const where = []; const args = [];
-  const { q, status, owner_id, priority, phase, state, states, milestone_id, ms_status, progress } = req.query;
+  const { q, status, owner_id, priority, phase, state, states, milestone_id, ms_status, progress, dd_stage } = req.query;
   if (phase) { where.push('p.phase = ?'); args.push(phase); }
+  if (dd_stage) { where.push('p.dd_stage = ?'); args.push(dd_stage); }
   if (states) {
     const list = String(states).split(',').map((x) => x.trim().toUpperCase()).filter(Boolean);
     if (list.length) { where.push(`p.state IN (${list.map(() => '?').join(',')})`); args.push(...list); }
@@ -554,6 +557,84 @@ app.patch('/api/projects/:id', wrap((req, res) => {
   })();
   // address changed (and no pin was placed by hand): look the site up on the map again
   if (changed.some((c) => ADDRESS_FIELDS.includes(c)) && !changed.includes('lat')) geocodeProject(p.id).catch(() => {});
+  res.json(getProject(p.id));
+}));
+
+// ---------- due diligence: assess → 10:30 review → site walk ----------
+const canReview = (u) => u.role === 'admin' || !!u.can_review;
+// the state's managers are the people whose territory includes it
+const stateManagers = (state) => db.prepare('SELECT id, name, states FROM users WHERE active = 1').all()
+  .filter((u) => state && String(u.states || '').split(',').includes(state));
+const siteWalkMilestone = () => db.prepare("SELECT * FROM milestones ORDER BY CASE WHEN LOWER(name) LIKE '%site walk%' THEN 0 ELSE 1 END, position LIMIT 1").get();
+
+// You: rate the site 1–5 and write your insight. submit = put it on the 10:30 review list.
+app.post('/api/projects/:id/assess', wrap((req, res) => {
+  const p = db.prepare('SELECT * FROM projects WHERE id = ?').get(req.params.id) || notFound('Project not found');
+  if (p.phase !== 'diligence') bad('This site is already in the pipeline');
+  const rating = req.body?.rating == null || req.body.rating === '' ? null : Number(req.body.rating);
+  if (rating != null && !(Number.isInteger(rating) && rating >= 1 && rating <= 5)) bad('Rating must be 1 to 5');
+  const insight = String(req.body?.insight ?? '').trim() || null;
+  const submit = !!req.body?.submit;
+  if (submit && (!rating || !insight)) bad('Give the site a rating and write your insight before sending it to review');
+  const t = now();
+  db.transaction(() => {
+    db.prepare(`UPDATE projects SET dd_rating = ?, dd_insight = ?, dd_assessed_by = ?, dd_assessed_at = ?, updated_at = ?
+      ${submit ? ", dd_stage = 'review'" : ''} WHERE id = ?`).run(rating, insight, req.user.id, t, t, p.id);
+    logActivity(p.id, req.user.id, submit ? 'sent_to_review' : 'assessed', `Rated ${rating ?? '—'}/5${submit ? ' · sent to the 10:30 review' : ''}`);
+  })();
+  res.json(getProject(p.id));
+}));
+
+// JoJo at the 10:30 review: approve (→ pipeline, site walk), needs more info (→ back to assess), or pass
+app.post('/api/projects/:id/review', wrap((req, res) => {
+  if (!canReview(req.user)) throw new HttpError(403, 'Only reviewers can approve or pass sites. An admin can turn this on in Admin.');
+  const p = db.prepare('SELECT * FROM projects WHERE id = ?').get(req.params.id) || notFound('Project not found');
+  if (p.phase !== 'diligence') bad('This site is already in the pipeline');
+  const decision = String(req.body?.decision || '');
+  const note = String(req.body?.note || '').trim().slice(0, 4000) || null;
+  if (!['approve', 'info', 'pass'].includes(decision)) bad('Pick approve, needs more info or pass');
+  if (decision === 'info' && !note) bad('Say what more information is needed');
+  const t = now();
+  let notified = [];
+  db.transaction(() => {
+    const base = 'dd_review_note = ?, dd_reviewed_by = ?, dd_reviewed_at = ?, updated_at = ?';
+    if (decision === 'info') {
+      db.prepare(`UPDATE projects SET dd_stage = 'new', ${base} WHERE id = ?`).run(note, req.user.id, t, t, p.id);
+      logActivity(p.id, req.user.id, 'review_info', `Needs more info: ${note}`);
+      if (p.dd_assessed_by) notify([p.dd_assessed_by], { kind: 'review', projectId: p.id, actorId: req.user.id, text: `${req.user.name} needs more info on ${p.code} ${p.name}: ${note}` });
+    } else if (decision === 'pass') {
+      db.prepare(`UPDATE projects SET dd_stage = 'passed', ${base} WHERE id = ?`).run(note, req.user.id, t, t, p.id);
+      logActivity(p.id, req.user.id, 'review_passed', `Passed${note ? `: ${note}` : ''}`);
+    } else {
+      // approved: into the pipeline with the site walk under way
+      const managers = stateManagers(p.state);
+      const ownerOk = managers.some((m) => m.id === p.owner_id);
+      db.prepare(`UPDATE projects SET dd_stage = 'approved', phase = 'pipeline', stage_entered_at = ?, diligence_completed_at = ?,
+        owner_id = ?, ${base} WHERE id = ?`).run(t, t, ownerOk || !managers.length ? p.owner_id : managers[0].id, note, req.user.id, t, t, p.id);
+      logActivity(p.id, req.user.id, 'moved_to_pipeline', `Approved at review → site walk${note ? `: ${note}` : ''}`);
+      const walk = siteWalkMilestone();
+      if (walk) {
+        setMilestone(p.id, walk, 'in_progress', req.user.id, null, t);
+        // the reviewer's instructions live in the site walk discussion
+        if (note) {
+          db.prepare('INSERT INTO messages (project_id, milestone_id, milestone_name, user_id, body, created_at) VALUES (?,?,?,?,?,?)')
+            .run(p.id, walk.id, walk.name, req.user.id, `Site walk instructions: ${note}`, t);
+        }
+      }
+      notified = managers.map((m) => m.name);
+      notify(managers.map((m) => m.id), { kind: 'site_walk', projectId: p.id, milestoneId: walk?.id, actorId: req.user.id,
+        text: `${req.user.name} approved ${p.code} ${p.name}${p.city ? ` (${p.city}, ${p.state})` : ''} for a site walk${note ? `: ${note}` : ''}` });
+    }
+  })();
+  res.json({ ...getProject(p.id), notified });
+}));
+
+// bring a passed site back to be assessed again
+app.post('/api/projects/:id/reopen', wrap((req, res) => {
+  const p = db.prepare('SELECT * FROM projects WHERE id = ?').get(req.params.id) || notFound('Project not found');
+  if (p.phase !== 'diligence') bad('This site is already in the pipeline');
+  db.prepare("UPDATE projects SET dd_stage = 'new', updated_at = ? WHERE id = ?").run(now(), p.id);
+  logActivity(p.id, req.user.id, 'reopened', 'Back to assessment');
   res.json(getProject(p.id));
 }));
 
@@ -1036,7 +1117,7 @@ app.delete('/api/documents/:id', wrap((req, res) => {
 
 // ---------- admin: users ----------
 app.get('/api/users', requireAdmin, (req, res) => {
-  res.json(db.prepare('SELECT id, name, email, role, active, states, created_at FROM users ORDER BY name').all());
+  res.json(db.prepare('SELECT id, name, email, role, active, states, can_review, created_at FROM users ORDER BY name').all());
 });
 
 app.post('/api/users', requireAdmin, wrap((req, res) => {
@@ -1044,8 +1125,8 @@ app.post('/api/users', requireAdmin, wrap((req, res) => {
   if (!name || !email) bad('Name and email are required');
   if (!password || String(password).length < 8) bad('Password must be at least 8 characters');
   if (db.prepare('SELECT 1 FROM users WHERE email = ?').get(email)) bad('A user with that email already exists');
-  const info = db.prepare('INSERT INTO users (name, email, password_hash, role, states) VALUES (?,?,?,?,?)')
-    .run(String(name), String(email).trim(), hashPassword(String(password)), role === 'admin' ? 'admin' : 'staff', normStates(states));
+  const info = db.prepare('INSERT INTO users (name, email, password_hash, role, states, can_review) VALUES (?,?,?,?,?,?)')
+    .run(String(name), String(email).trim(), hashPassword(String(password)), role === 'admin' ? 'admin' : 'staff', normStates(states), req.body?.can_review ? 1 : 0);
   res.status(201).json({ id: info.lastInsertRowid });
 }));
 
@@ -1063,6 +1144,7 @@ app.patch('/api/users/:id', requireAdmin, wrap((req, res) => {
   }
   if (active === false || active === 0) db.prepare('DELETE FROM sessions WHERE user_id = ?').run(u.id);
   if ('states' in (req.body || {})) db.prepare('UPDATE users SET states = ? WHERE id = ?').run(normStates(req.body.states), u.id);
+  if ('can_review' in (req.body || {})) db.prepare('UPDATE users SET can_review = ? WHERE id = ?').run(req.body.can_review ? 1 : 0, u.id);
   res.json({ ok: true });
 }));
 

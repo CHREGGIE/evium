@@ -46,9 +46,6 @@ const stateName = (code) => (US_STATES.find(([c]) => c === String(code || '').to
 // keep a non-standard saved value selectable so editing never silently drops it
 const stateOptions = (sel) => options(sel && !US_STATES.some(([c]) => c === sel) ? [[sel, sel], ...US_STATES] : US_STATES, sel, { blank: '—' });
 // Due diligence checklist: these must be filled before a property can move to the pipeline
-const DD_CHECKS = [['property_owner', 'Property owner'], ['rebate_program', 'Rebate'], ['utility_company', 'Utility company']];
-const ddHas = (p, k) => (k === 'rebate_program' && p.rebates?.length) || !!String(p[k] ?? '').trim();
-const ddMissing = (p) => DD_CHECKS.filter(([k]) => !ddHas(p, k));
 const phaseBadge = () => badge('ph-dd', 'Due diligence');
 // ---------- milestones ----------
 // Each project tracks every milestone on its own; they can be finished in any order.
@@ -192,7 +189,7 @@ const territoryToggle = (on) => (myStates().length
   ? `<button type="button" class="chip ${on ? 'active' : ''}" id="mineToggle" title="Only show ${esc(myStates().join(', '))}">★ My territory</button>` : '');
 
 // ---------- notifications ----------
-const NOTIF_ICON = { mention: '@', message: '💬', reminder: '⏰', reminder_set: '⏰', territory: '★' };
+const NOTIF_ICON = { site_walk: '→', review: '?', mention: '@', message: '💬', reminder: '⏰', reminder_set: '⏰', territory: '★' };
 let bellTimer = null;
 async function refreshBell() {
   if (!S.me) return;
@@ -816,7 +813,7 @@ async function renderDashboard() {
   view.innerHTML = `
     <div class="page-head"><h1>Dashboard</h1><div class="actions"><button class="btn primary" id="newProject">+ New property</button></div></div>
     <div class="kpis">
-      <a class="card kpi" href="#/diligence"><div class="l">In due diligence</div><div class="v">${num(t.in_diligence)}</div></a>
+      <a class="card kpi" href="#/diligence?tab=new"><div class="l">To assess</div><div class="v">${num(t.to_assess)} <span class="small muted">${num(t.to_review)} for 10:30 review</span></div></a>
       <a class="card kpi" href="#/pipeline"><div class="l">Projects in progress</div><div class="v">${num(t.open_projects)}</div></a>
       <div class="card kpi"><div class="l">Pipeline value</div><div class="v">${money(t.pipeline_value)}</div></div>
       <div class="card kpi"><div class="l">Ports in pipeline</div><div class="v">${num(t.pipeline_chargers)}</div></div>
@@ -878,7 +875,7 @@ async function renderDashboard() {
 }
 
 function activityItem(a) {
-  const icons = { step_done: '✓', reminder_set: '⏰', message: '💬', milestone_updated: '🏁', moved_to_pipeline: '✅', project_created: '🆕', stage_changed: '➡️', status_changed: '🚦', project_updated: '✏️', ticket_created: '🎫', ticket_updated: '🎫', ticket_deleted: '🗑️', documents_uploaded: '📎', document_deleted: '🗑️', note: '📝' };
+  const icons = { sent_to_review: '★', assessed: '★', review_info: '?', review_passed: '✕', reopened: '↺', step_done: '✓', reminder_set: '⏰', message: '💬', milestone_updated: '🏁', moved_to_pipeline: '✅', project_created: '🆕', stage_changed: '➡️', status_changed: '🚦', project_updated: '✏️', ticket_created: '🎫', ticket_updated: '🎫', ticket_deleted: '🗑️', documents_uploaded: '📎', document_deleted: '🗑️', note: '📝' };
   const proj = a.project_name ? ` <a href="#/projects/${a.project_id}">${esc(a.code)}</a>` : '';
   const body = a.action === 'note' ? `<div class="note">${esc(a.detail)}</div>` : `<span>${esc(a.detail || '')}</span>`;
   return `<div class="feed-item">${icons[a.action] || '•'} <b>${esc(a.user_name || 'System')}</b> <span class="muted">${esc(label(a.action))}</span>${proj}
@@ -889,89 +886,170 @@ function bindRowLinks(root = view) {
   $$('tr[data-href]', root).forEach((tr) => tr.addEventListener('click', (e) => { if (!e.target.closest('a,button,select,input')) location.hash = tr.dataset.href; }));
 }
 
-// ---------- due diligence ----------
+// ---------- due diligence: assess (1–5 + insight) → 10:30 review → site walk ----------
+const RATING_LABEL = { 1: 'Poor', 2: 'Weak', 3: 'Fair', 4: 'Good', 5: 'Excellent' };
+const canReview = () => S.me.role === 'admin' || !!S.me.can_review;
+// the people set up to run the 10:30 review (admins only if nobody is)
+const reviewers = () => {
+  const named = S.meta.users.filter((u) => u.active && u.can_review);
+  return (named.length ? named : S.meta.users.filter((u) => u.active && u.role === 'admin')).map((u) => u.name.split(' ')[0]);
+};
+const managersFor = (state) => S.meta.users.filter((u) => u.active && state && String(u.states || '').split(',').includes(state));
+const ratingView = (r) => (r ? `<span class="rating r${r}" title="${r} of 5 · ${RATING_LABEL[r]}"><span class="rating-bars">${[1, 2, 3, 4, 5].map((n) => `<i class="${n <= r ? 'on' : ''}"></i>`).join('')}</span><b>${r}</b>/5 <span class="muted">${RATING_LABEL[r]}</span></span>` : '<span class="muted small">Not rated</span>');
+const DD_STAGE_LABEL = { new: 'To assess', review: 'Waiting for 10:30 review', passed: 'Passed', approved: 'Approved' };
+const siteLine = (p) => [[p.city, p.state].filter(Boolean).join(', '), p.address ? p.name : '', p.code].filter(Boolean).join(' · ');
+const siteFacts = (p) => [
+  p.property_owner ? `Owner: ${esc(p.property_owner)}` : '',
+  p.utility_company ? `Utility: ${esc(p.utility_company)}` : '',
+  p.site_type ? esc(label(p.site_type)) : '',
+  p.charger_count ? `${p.charger_count} ${esc(p.charger_type || 'ports')}` : '',
+  p.estimated_value ? money(p.estimated_value) : '',
+].filter(Boolean).join(' · ');
+
 async function renderDiligence() {
   const q = qs();
-  const f = { q: q.get('q') || '', state: q.get('state') || '', status: q.get('status') ?? 'open' };
+  const tab = q.get('tab') || (canReview() ? 'review' : 'new');
   const mine = q.get('mine') === '1' && myStates().length;
-  const params = new URLSearchParams({ phase: 'diligence', ...Object.fromEntries(Object.entries(f).filter(([, v]) => v)) });
+  const params = new URLSearchParams({ phase: 'diligence', status: 'open' });
+  if (q.get('state')) params.set('state', q.get('state'));
+  if (q.get('q')) params.set('q', q.get('q'));
   if (mine) params.set('states', myStates().join(','));
-  const rows = territoryFirst(await api('GET', `/api/projects?${params}`));
-  const ready = rows.filter((p) => !ddMissing(p).length).length;
+  const all = await api('GET', `/api/projects?${params}`);
+  const by = { new: [], review: [], passed: [] };
+  all.forEach((p) => by[p.dd_stage]?.push(p));
+  by.new = territoryFirst(by.new.sort((a, b) => !!b.dd_review_note - !!a.dd_review_note || b.days_in_phase - a.days_in_phase));
+  by.review.sort((a, b) => (b.dd_rating || 0) - (a.dd_rating || 0));
+  const rows = by[tab] || [];
+  const tabBtn = (k, t) => `<button type="button" class="tab ${tab === k ? 'active' : ''}" data-ddtab="${k}">${t} <span class="tab-n">${by[k].length}</span></button>`;
+
+  const assessRow = (p) => `<div class="dd-row">
+      <a class="dd-main" href="#/projects/${p.id}"><b>${esc(p.address || p.name)}</b><span class="muted small">${esc(siteLine(p))}</span>
+        <span class="small dd-facts">${siteFacts(p) || '<span class="muted">No details yet</span>'}</span></a>
+      <div class="dd-mid">
+        ${p.dd_review_note ? `<div class="dd-returned"><b>${esc(p.reviewed_by_name || 'Reviewer')} needs more info:</b> ${esc(p.dd_review_note)}</div>` : ''}
+        ${p.dd_rating ? `<div>${ratingView(p.dd_rating)} <span class="muted small">draft</span></div>` : ''}
+        <span class="muted small">In due diligence ${p.days_in_phase} day${p.days_in_phase === 1 ? '' : 's'}</span>
+      </div>
+      <div class="dd-act"><button class="btn primary" data-assess="${p.id}">${p.dd_rating ? 'Finish assessment' : 'Assess'}</button></div>
+    </div>`;
+  const reviewCard = (p) => `<article class="dd-card2">
+      <div class="dd-card2-head">
+        <div><a href="#/projects/${p.id}" class="dd-title">${esc(p.address || p.name)}</a><div class="muted small">${esc(siteLine(p))}</div></div>
+        <div class="dd-score">${ratingView(p.dd_rating)}</div>
+      </div>
+      <div class="dd-insight">${esc(p.dd_insight || '')}</div>
+      <div class="small dd-facts">${siteFacts(p)}${p.rebates.length ? ` · ${p.rebates.map(rebateChip).join(' ')}` : ''}</div>
+      <div class="dd-card2-foot">
+        <span class="muted small">Assessed by ${esc(p.assessed_by_name || '—')} · ${fdate(p.dd_assessed_at)}${managersFor(p.state).length ? ` · ${esc(p.state)} manager: ${esc(managersFor(p.state).map((u) => u.name).join(', '))}` : ''}</span>
+        <span class="dd-btns">${canReview()
+          ? `<button class="btn" data-review="info" data-id="${p.id}">Needs more info</button><button class="btn" data-review="pass" data-id="${p.id}">Pass</button><button class="btn primary" data-review="approve" data-id="${p.id}">Approve for site walk</button>`
+          : `<button class="btn" data-assess="${p.id}">Edit rating</button>`}</span>
+      </div>
+    </article>`;
+  const passedRow = (p) => `<div class="dd-row">
+      <a class="dd-main" href="#/projects/${p.id}"><b>${esc(p.address || p.name)}</b><span class="muted small">${esc(siteLine(p))}</span></a>
+      <div class="dd-mid">${ratingView(p.dd_rating)}<span class="small">${p.dd_review_note ? `“${esc(p.dd_review_note)}”` : '<span class="muted">No reason given</span>'}</span>
+        <span class="muted small">Passed by ${esc(p.reviewed_by_name || '—')} · ${fdate(p.dd_reviewed_at)}</span></div>
+      <div class="dd-act"><button class="btn" data-reopen="${p.id}">Reopen</button></div>
+    </div>`;
+
+  const now = new Date(); const at1030 = new Date(); at1030.setHours(10, 30, 0, 0);
+  const nextReview = now <= at1030 ? 'today at 10:30' : 'tomorrow at 10:30';
   view.innerHTML = `
-    <div class="page-head"><h1>Due Diligence <span class="muted small">${rows.length}</span></h1>
+    <div class="page-head"><h1>Due Diligence</h1>
       <div class="actions">${territoryToggle(mine)}<button class="btn primary" id="newProperty">+ New property</button></div></div>
-    <p class="muted small" style="margin-top:-8px">New properties start here. Fill in the property owner, the rebate the site qualifies for and the utility company, then move it to the pipeline.
-      ${rows.length ? `<b>${ready} of ${rows.length}</b> ready to move.` : ''}</p>
+    <div class="tabs dd-tabs">${tabBtn('new', 'To assess')}${tabBtn('review', '10:30 review')}${tabBtn('passed', 'Passed')}</div>
     <form class="filters" id="ddFilters">
-      <input type="search" name="q" placeholder="Search name, address, owner, utility…" value="${esc(f.q)}">
-      <select name="state">${options(US_STATES.map(([c, n]) => [c, `${c} · ${n}`]), f.state, { blank: 'All states' })}</select>
-      <select name="status">${options([['open', 'Open'], ...S.meta.enums.projectStatus.map((s) => [s, label(s)])], f.status, { blank: 'All statuses' })}</select>
+      <input type="search" name="q" placeholder="Search address, owner, utility…" value="${esc(q.get('q') || '')}">
+      <select name="state">${options(US_STATES.map(([c, n]) => [c, `${c} · ${n}`]), q.get('state'), { blank: 'All states' })}</select>
     </form>
-    <div class="table-wrap"><table><thead><tr><th>Property</th><th>State</th><th>Property owner</th><th>Rebate</th><th>Utility</th><th>Checklist</th><th>In due diligence</th><th></th></tr></thead>
-    <tbody>${rows.map((p) => {
-      const missing = ddMissing(p);
-      return `<tr class="clickable" data-href="#/projects/${p.id}">
-      <td><b>${esc(p.name)}</b><div class="muted small">${esc(p.code)}${p.address || p.city ? ` · ${esc([p.address, p.city].filter(Boolean).join(', '))}` : ''}</div></td>
-      <td>${p.state ? `<b>${esc(p.state)}</b>${inMyTerritory(p) ? ' <span title="Your territory">★</span>' : ''}` : '<span class="muted">—</span>'}</td>
-      <td>${esc(p.property_owner || '—')}${p.property_owner_contact ? `<div class="muted small">${esc(p.property_owner_contact)}</div>` : ''}</td>
-      <td>${p.rebates.map(rebateChip).join(' ') || esc(p.rebate_program || '—')}${p.rebate_amount ? `<div class="muted small">${money(p.rebate_amount)}</div>` : ''}</td>
-      <td>${p.utility_id ? `<a href="#/utilities/${p.utility_id}">${esc(p.utility_company)}</a>` : esc(p.utility_company || '—')}</td>
-      <td><div class="checks">${DD_CHECKS.map(([k, t]) => `<span class="chk ${ddHas(p, k) ? 'ok' : ''}" title="${esc(t)}">${ddHas(p, k) ? '✓' : '○'} ${esc(t)}</span>`).join('')}</div></td>
-      <td class="muted">${p.days_in_phase}d</td>
-      <td style="text-align:right">${missing.length
-        ? `<button class="btn sm" data-edit="${p.id}">Fill in details</button>`
-        : `<button class="btn sm primary" data-promote="${p.id}">Move to pipeline →</button>`}</td></tr>`;
-    }).join('') || '<tr><td colspan="8" class="empty">No properties in due diligence. Click <b>+ New property</b> to add one.</td></tr>'}</tbody></table></div>`;
+    ${tab === 'new' ? `<p class="muted small dd-help">Rate each new site from 1 to 5 and write your insight. Then send it to the 10:30 review.</p>
+      <div class="dd-list">${rows.map(assessRow).join('') || '<div class="card empty">Nothing waiting to be assessed.</div>'}</div>` : ''}
+    ${tab === 'review' ? `<p class="muted small dd-help">Next review ${nextReview}${reviewers().length ? ` with ${esc(reviewers().join(', '))}` : ''}. Approving moves the site to the Pipeline at the site walk and notifies that state's manager.</p>
+      <div class="dd-cards">${rows.map(reviewCard).join('') || '<div class="card empty">Nothing waiting for review.</div>'}</div>` : ''}
+    ${tab === 'passed' ? `<p class="muted small dd-help">Sites we decided not to pursue. Reopen one to assess it again.</p>
+      <div class="dd-list">${rows.map(passedRow).join('') || '<div class="card empty">No passed sites.</div>'}</div>` : ''}`;
+
   const form = $('#ddFilters');
-  const apply = (over = {}) => {
-    const p = new URLSearchParams(); Object.entries(formData(form)).forEach(([k, v]) => p.set(k, v));
+  const go = (over = {}) => {
+    const p = new URLSearchParams(); Object.entries(formData(form)).forEach(([k, v]) => v && p.set(k, v));
+    p.set('tab', over.tab || tab);
     if ('mine' in over ? over.mine : mine) p.set('mine', '1');
     location.hash = `#/diligence?${p}`;
   };
-  $$('select', form).forEach((s) => (s.onchange = () => apply()));
-  let t; $('input[name=q]', form).addEventListener('input', () => { clearTimeout(t); t = setTimeout(() => apply(), 350); });
-  form.addEventListener('submit', (e) => { e.preventDefault(); apply(); });
-  $('#mineToggle')?.addEventListener('click', () => apply({ mine: !mine }));
+  $$('select', form).forEach((s) => (s.onchange = () => go()));
+  let t; $('input[name=q]', form).addEventListener('input', () => { clearTimeout(t); t = setTimeout(() => go(), 350); });
+  form.addEventListener('submit', (e) => { e.preventDefault(); go(); });
+  $$('[data-ddtab]', view).forEach((b) => (b.onclick = () => go({ tab: b.dataset.ddtab })));
+  $('#mineToggle')?.addEventListener('click', () => go({ mine: !mine }));
   $('#newProperty').onclick = () => projectForm(null, { phase: 'diligence' });
-  const byId = (id) => rows.find((x) => String(x.id) === id);
-  $$('[data-promote]', view).forEach((b) => (b.onclick = () => promoteModal(byId(b.dataset.promote), renderDiligence)));
-  $$('[data-edit]', view).forEach((b) => (b.onclick = () => projectForm(byId(b.dataset.edit))));
+  const byId = (id) => all.find((x) => String(x.id) === String(id));
+  $$('[data-assess]', view).forEach((b) => (b.onclick = () => assessModal(byId(b.dataset.assess), renderDiligence)));
+  $$('[data-review]', view).forEach((b) => (b.onclick = () => reviewModal(byId(b.dataset.id), b.dataset.review, renderDiligence)));
+  $$('[data-reopen]', view).forEach((b) => (b.onclick = async () => {
+    try { await api('POST', `/api/projects/${b.dataset.reopen}/reopen`); toast('Back in To assess'); renderDiligence(); } catch (err) { fail(err); }
+  }));
   bindRebateChips();
-  bindRowLinks();
-  const qi = $('input[name=q]', form); if (f.q) { qi.focus(); qi.setSelectionRange(f.q.length, f.q.length); }
+  const qi = $('input[name=q]', form); if (q.get('q')) { qi.focus(); qi.setSelectionRange(qi.value.length, qi.value.length); }
 }
 
-function promoteModal(p, after) {
-  const missing = ddMissing(p);
-  if (missing.length) {
-    const card = openModal(`${modalHead('Due diligence not finished')}
-      <p><b>${esc(p.name)}</b> <span class="muted">(${esc(p.code)})</span> still needs:</p>
-      <ul>${missing.map(([, t]) => `<li>${esc(t)}</li>`).join('')}</ul>
-      <div class="modal-foot"><button type="button" class="btn" data-close>Cancel</button><button class="btn primary" id="fillIn">Fill in details</button></div>`);
-    $('#fillIn', card).onclick = () => { modalClose = null; closeModal(); projectForm(p); };
-    return;
-  }
-  const card = openModal(`${modalHead('Move to pipeline')}
-    <p><b>${esc(p.name)}</b> <span class="muted">(${esc(p.code)}${p.state ? ` · ${esc(stateName(p.state))}` : ''})</span></p>
-    <dl class="kv" style="margin-bottom:14px"><dt>Property owner</dt><dd>${esc(p.property_owner)}</dd>
-      <dt>Rebate</dt><dd>${p.rebates.map((r) => esc(r.name)).join(', ') || esc(p.rebate_program)}${p.rebate_amount ? ` · ${money(p.rebate_amount)}` : ''}</dd>
-      <dt>Utility</dt><dd>${esc(p.utility_company)}</dd></dl>
-    ${p.state ? '' : '<p class="small" style="color:var(--warn)">No state is set, so it will show under "No state" in the pipeline. Edit the property to add one.</p>'}
+// You: rate the site 1–5 and write your insight
+function assessModal(p, after) {
+  let rating = p.dd_rating || null;
+  const card = openModal(`${modalHead('Assess site')}
+    <div class="dd-sum"><b>${esc(p.address || p.name)}</b><div class="muted small">${esc(siteLine(p))}</div>
+      <div class="small" style="margin-top:4px">${siteFacts(p)}</div>
+      <a class="small" href="#/projects/${p.id}" id="toSite">Open the full site details →</a></div>
+    ${p.dd_review_note && p.dd_stage === 'new' ? `<div class="dd-returned"><b>${esc(p.reviewed_by_name || 'Reviewer')} needs more info:</b> ${esc(p.dd_review_note)}</div>` : ''}
     <form class="grid">
-      <div><div class="small" style="font-weight:600;color:#334155;margin-bottom:6px">Anything already under way? (you can change these any time)</div>
-        <div class="ms-pick">${S.meta.milestones.map((m) => `<label class="ms-pick-row"><span><span class="dot" style="background:${esc(m.color)}"></span> ${esc(m.name)}</span>
-          <select name="ms_${m.id}">${options(MS_STATUSES.map((s) => [s, MS_LABEL[s]]), 'not_started')}</select></label>`).join('')}</div></div>
-      <label>Note (optional)<textarea name="note" placeholder="e.g. Owner signed LOI, utility confirmed capacity"></textarea></label>
-      <div class="modal-foot"><button type="button" class="btn" data-close>Cancel</button><button class="btn primary">Move to pipeline</button></div>
+      <div><div class="pick-label">Rating</div>
+        <div class="rate-pick" role="radiogroup" aria-label="Rating">${[1, 2, 3, 4, 5].map((n) => `<button type="button" role="radio" class="rate-btn" data-rate="${n}" aria-checked="${rating === n}"><b>${n}</b><span>${RATING_LABEL[n]}</span></button>`).join('')}</div></div>
+      <label>Your insight
+        <textarea name="insight" rows="7" placeholder="Why this rating? Power and panel capacity, parking layout, location and traffic, owner interest, rebate fit, any red flags…">${esc(p.dd_insight)}</textarea></label>
+      <div class="modal-foot" style="justify-content:space-between"><button type="button" class="btn" data-close>Cancel</button>
+        <span style="display:flex;gap:8px"><button type="button" class="btn" id="saveDraft">Save draft</button><button class="btn primary">Send to 10:30 review</button></span></div>
+    </form>`, { wide: true });
+  const draw = () => $$('[data-rate]', card).forEach((b) => { const on = Number(b.dataset.rate) === rating; b.classList.toggle('on', on); b.setAttribute('aria-checked', on); });
+  $$('[data-rate]', card).forEach((b) => (b.onclick = () => { rating = Number(b.dataset.rate); draw(); }));
+  draw();
+  $('#toSite', card).onclick = () => { modalClose = null; closeModal(); };
+  const save = async (submit) => {
+    try {
+      await api('POST', `/api/projects/${p.id}/assess`, { rating, insight: $('[name=insight]', card).value, submit });
+      modalClose = null; closeModal(); toast(submit ? 'Sent to the 10:30 review' : 'Draft saved'); after?.();
+    } catch (err) { fail(err); }
+  };
+  $('#saveDraft', card).onclick = () => save(false);
+  $('form', card).addEventListener('submit', (e) => { e.preventDefault(); save(true); });
+}
+
+// JoJo at the 10:30 review
+function reviewModal(p, decision, after) {
+  const managers = managersFor(p.state);
+  const cfg = {
+    approve: { title: 'Approve for site walk', btn: 'Approve and send to site walk', label: 'Notes for the site walk (optional)', ph: 'e.g. Check the panel room in the basement; owner wants 10+ ports; meet the property manager at the loading dock', required: false },
+    info: { title: 'Needs more info', btn: 'Send back', label: 'What do you need?', ph: 'e.g. Find out who owns the lot next door and whether the utility has capacity', required: true },
+    pass: { title: 'Pass on this site', btn: 'Pass', label: 'Why are we passing? (optional)', ph: 'e.g. Not enough power without a costly transformer upgrade', required: false },
+  }[decision];
+  const card = openModal(`${modalHead(cfg.title)}
+    <div class="dd-sum"><b>${esc(p.address || p.name)}</b><div class="muted small">${esc(siteLine(p))}</div>
+      <div style="margin-top:6px">${ratingView(p.dd_rating)}</div>
+      ${p.dd_insight ? `<div class="small dd-insight" style="margin-top:6px">${esc(p.dd_insight)}</div>` : ''}</div>
+    ${decision === 'approve' ? (managers.length
+      ? `<div class="note-ok small">It moves to the Pipeline with the site walk under way, and <b>${esc(managers.map((u) => u.name).join(', '))}</b> (${esc(p.state)} manager${managers.length === 1 ? '' : 's'}) will be notified.</div>`
+      : `<div class="note-warn small">Nobody has ${esc(p.state || 'this state')} in their territory, so nobody will be notified. Set territories in Admin.</div>`) : ''}
+    ${decision === 'info' ? `<div class="muted small" style="margin-bottom:8px">It goes back to To assess${p.assessed_by_name ? `, and ${esc(p.assessed_by_name)} is notified` : ''}.</div>` : ''}
+    <form class="grid">
+      <label>${cfg.label}<textarea name="note" rows="4" ${cfg.required ? 'required' : ''} placeholder="${esc(cfg.ph)}"></textarea></label>
+      <div class="modal-foot"><button type="button" class="btn" data-close>Cancel</button><button class="btn ${decision === 'pass' ? 'danger' : 'primary'}">${cfg.btn}</button></div>
     </form>`);
   $('form', card).addEventListener('submit', async (e) => {
     e.preventDefault();
-    const f = formData(e.target); const milestones = {};
-    S.meta.milestones.forEach((m) => { if (f[`ms_${m.id}`] && f[`ms_${m.id}`] !== 'not_started') milestones[m.id] = f[`ms_${m.id}`]; });
     try {
-      const saved = await api('POST', `/api/projects/${p.id}/promote`, { note: f.note, milestones });
-      modalClose = null; closeModal(); toast(`${saved.code} moved to the pipeline`); after?.();
+      const r = await api('POST', `/api/projects/${p.id}/review`, { decision, note: $('[name=note]', card).value });
+      modalClose = null; closeModal();
+      toast(decision === 'approve' ? `Approved. ${r.notified?.length ? `${r.notified.join(', ')} notified.` : 'Moved to the site walk.'}` : decision === 'pass' ? 'Passed' : 'Sent back for more info');
+      after?.(r);
     } catch (err) { fail(err); }
   });
 }
@@ -1132,12 +1210,12 @@ function projectForm(p = null, { phase = 'diligence' } = {}) {
   const e = S.meta.enums; const v = p || { status: 'active', priority: 'medium', owner_id: S.me.id, tax_credit_eligible: 'unknown' };
   const isDD = p ? p.phase === 'diligence' : phase === 'diligence';
   const startOpts = [['dd', 'Due diligence (recommended)'], ['pipeline', 'Pipeline (skip due diligence)']];
-  const ddSection = `<h3 class="full" style="margin:6px 0 0">Due diligence <span class="muted small" style="font-weight:500">— owner, rebate and utility are needed before moving to the pipeline</span></h3>
-      <label>Property owner${isDD ? ' *' : ''}<input name="property_owner" value="${esc(v.property_owner)}" placeholder="Who owns the property"></label>
+  const ddSection = `<h3 class="full" style="margin:6px 0 0">Property</h3>
+      <label>Property owner<input name="property_owner" value="${esc(v.property_owner)}" placeholder="Who owns the property"></label>
       <label>Owner contact<input name="property_owner_contact" value="${esc(v.property_owner_contact)}" placeholder="Phone or email"></label>
-      <label class="full">Utility company${isDD ? ' *' : ''}
+      <label class="full">Utility company
         <span class="input-row"><select name="utility_id" id="pfUtility"></select><button type="button" class="btn sm" id="pfNewUtility">+ New utility</button></span></label>
-      <div class="full pick-block"><div class="pick-label">Rebate we're going after${isDD ? ' *' : ''} <span class="muted small" id="pfRebateHint"></span></div>
+      <div class="full pick-block"><div class="pick-label">Rebate we're going after <span class="muted small" id="pfRebateHint"></span></div>
         <div id="pfRebates" class="grid" style="gap:6px"></div>
         <button type="button" class="link-btn small" id="pfAddRebate">+ add another rebate (stacking)</button></div>
       <label>Not on the board? Type it, or “None”<input name="rebate_program" value="${esc(v.rebate_program)}" placeholder="Only if it isn't on the Rebates board"></label>
@@ -1352,7 +1430,6 @@ let projectTab = 'chat';
 async function renderProject(id) {
   const p = await api('GET', `/api/projects/${id}`);
   const dd = p.phase === 'diligence';
-  const missing = ddMissing(p);
   $$('[data-nav]').forEach((a) => a.classList.toggle('active', a.dataset.nav === (dd ? 'diligence' : 'projects')));
   view.innerHTML = `
     <div class="page-head">
@@ -1366,17 +1443,19 @@ async function renderProject(id) {
       </div>
       <div class="actions">
         <select id="quickStatus" title="Status">${options(S.meta.enums.projectStatus, p.status)}</select>
-        ${dd ? `<button class="btn ${missing.length ? '' : 'primary'}" id="promote">Move to pipeline →</button>` : ''}
+        ${dd && p.dd_stage === 'new' ? `<button class="btn primary" id="ddAssess">${p.dd_rating ? 'Finish assessment' : 'Assess'}</button>` : ''}
+        ${dd && p.dd_stage === 'review' && canReview() ? '<button class="btn" data-pr="info">Needs more info</button><button class="btn" data-pr="pass">Pass</button><button class="btn primary" data-pr="approve">Approve for site walk</button>' : ''}
+        ${dd && p.dd_stage === 'review' && !canReview() ? '<button class="btn" id="ddAssess">Edit rating</button>' : ''}
+        ${dd && p.dd_stage === 'passed' ? '<button class="btn" id="ddReopen">Reopen</button>' : ''}
         <button class="btn" id="editProject">Edit</button>
         ${S.me.role === 'admin' ? '<button class="btn danger" id="delProject">Delete</button>' : ''}
       </div>
     </div>
-    ${dd ? `<div class="card dd-card"><h2 style="margin-bottom:8px">Due diligence checklist</h2>
-      <div class="checks big">${DD_CHECKS.map(([k, t]) => {
-        const val = k === 'rebate_program' && p.rebates.length ? p.rebates.map((r) => r.name).join(' + ') : p[k];
-        return `<span class="chk ${ddHas(p, k) ? 'ok' : ''}">${ddHas(p, k) ? '✓' : '○'} ${esc(t)}${ddHas(p, k) ? `: <b>${esc(val)}</b>` : ''}</span>`;
-      }).join('')}</div>
-      <div class="small muted" style="margin-top:8px">${missing.length ? `Still needed: ${missing.map(([, t]) => esc(t)).join(', ')}. Click <b>Edit</b> to fill them in.` : 'All checks done. Click <b>Move to pipeline</b> to start tracking milestones.'}</div></div>`
+    ${dd ? `<div class="card dd-card"><div class="card-head"><h2>Assessment</h2><span class="ms-pill ms-pill-${p.dd_stage === 'passed' ? 'not_needed' : p.dd_stage === 'review' ? 'in_progress' : 'not_started'}">${esc(DD_STAGE_LABEL[p.dd_stage] || p.dd_stage)}</span></div>
+      ${p.dd_stage === 'new' && p.dd_review_note ? `<div class="dd-returned"><b>${esc(p.reviewed_by_name || 'Reviewer')} needs more info:</b> ${esc(p.dd_review_note)}</div>` : ''}
+      <div style="margin-bottom:6px">${ratingView(p.dd_rating)}</div>
+      ${p.dd_insight ? `<div class="dd-insight">${esc(p.dd_insight)}</div><div class="muted small" style="margin-top:6px">Assessed by ${esc(p.assessed_by_name || '—')} · ${fdate(p.dd_assessed_at)}</div>` : '<div class="muted small">No insight written yet.</div>'}
+      ${p.dd_stage === 'passed' ? `<div class="small" style="margin-top:8px">Passed by ${esc(p.reviewed_by_name || '—')} · ${fdate(p.dd_reviewed_at)}${p.dd_review_note ? `: “${esc(p.dd_review_note)}”` : ''}</div>` : ''}</div>`
     : `<div class="card"><div class="card-head"><h2>Milestones</h2><span class="muted small">${p.ms_complete ? 'All done. This site is live.' : `${p.ms_done} of ${p.ms_total} done · in any order`}</span></div>${msList(p)}</div>`}
     <div class="cols-main" style="margin-top:16px">
       <div>
@@ -1384,14 +1463,15 @@ async function renderProject(id) {
         <div id="tabBody"></div>
       </div>
       <div class="grid" style="gap:16px">
-        <div class="card"><h2>Due diligence</h2><dl class="kv">
+        <div class="card"><h2>Property</h2><dl class="kv">
           <dt>Property owner</dt><dd>${esc(p.property_owner || '—')}</dd>
           <dt>Owner contact</dt><dd>${esc(p.property_owner_contact || '—')}</dd>
           <dt>Rebate</dt><dd>${p.rebates.map(rebateChip).join(' ')}${p.rebate_program ? `${p.rebates.length ? '<br>' : ''}${esc(p.rebate_program)}` : p.rebates.length ? '' : '—'}${p.rebate_amount ? `<div class="muted small">expected ${money(p.rebate_amount)}</div>` : ''}</dd>
           <dt>Utility</dt><dd>${p.utility_id ? `<a href="#/utilities/${p.utility_id}">${esc(p.utility_company)}</a>` : esc(p.utility_company || '—')}</dd>
           <dt>Tax credit</dt><dd>${p.tax_credit_id ? rebateChip(S.meta.rebates.find((r) => r.id === p.tax_credit_id) || { id: p.tax_credit_id, name: 'Tax credit' }) : '—'}
             <div class="muted small">${{ yes: 'Eligible', no: 'Not eligible', unknown: 'Eligibility not checked yet' }[p.tax_credit_eligible || 'unknown']}${p.tax_credit_amount ? ` · est. ${money(p.tax_credit_amount)}` : ''}</div></dd>
-          ${p.diligence_completed_at ? `<dt>Completed</dt><dd>${fdate(p.diligence_completed_at)}</dd>` : ''}
+          ${p.dd_rating ? `<dt>Rating</dt><dd>${ratingView(p.dd_rating)}</dd>` : ''}
+          ${p.diligence_completed_at ? `<dt>Approved</dt><dd>${fdate(p.diligence_completed_at)}${p.reviewed_by_name ? ` by ${esc(p.reviewed_by_name)}` : ''}</dd>` : ''}
         </dl>${p.diligence_notes ? `<h3 style="margin-top:14px">Notes</h3><div style="white-space:pre-wrap">${esc(p.diligence_notes)}</div>` : ''}</div>
         <div class="card" id="remCard"></div>
         <div class="card"><h2>Customer</h2><dl class="kv">
@@ -1415,7 +1495,9 @@ async function renderProject(id) {
     </div>`;
 
   $('#editProject').onclick = () => projectForm(p);
-  $('#promote')?.addEventListener('click', () => promoteModal(p, route));
+  $('#ddAssess')?.addEventListener('click', () => assessModal(p, route));
+  $('#ddReopen')?.addEventListener('click', async () => { try { await api('POST', `/api/projects/${p.id}/reopen`); toast('Back in To assess'); route(); } catch (err) { fail(err); } });
+  $$('[data-pr]', view).forEach((b) => (b.onclick = () => reviewModal(p, b.dataset.pr, (r) => { if (b.dataset.pr === 'approve' && r) location.hash = msHref(p.id, r.milestones.find((x) => x.status === 'in_progress')?.id || r.milestones[0].id); else route(); })));
   bindRebateChips();
   projectRemindersCard(p, $('#remCard')).catch(() => {});
   $('#quickStatus').onchange = async (e) => {
@@ -1653,7 +1735,7 @@ async function renderAdmin() {
       <div class="card"><div style="display:flex;justify-content:space-between;align-items:center"><h2>Staff users</h2><button class="btn primary sm" id="addUser">+ Add user</button></div>
         <p class="muted small">Only Evium staff sign in. Customers are stored as contacts on each project and never need an account.</p>
         <div class="table-wrap" style="box-shadow:none"><table><thead><tr><th>Name</th><th>Role</th><th>Territory</th><th>Status</th><th></th></tr></thead><tbody>
-        ${users.map((u) => `<tr><td><b>${esc(u.name)}</b><div class="muted small">${esc(u.email)}</div></td><td>${esc(label(u.role))}</td><td>${esc((u.states || '').replace(/,/g, ', ') || '—')}</td>
+        ${users.map((u) => `<tr><td><b>${esc(u.name)}</b><div class="muted small">${esc(u.email)}</div></td><td>${esc(label(u.role))}${u.role !== 'admin' && u.can_review ? '<div class="muted small">10:30 reviewer</div>' : ''}</td><td>${esc((u.states || '').replace(/,/g, ', ') || '—')}</td>
           <td>${u.active ? badge('s-active', 'Active') : badge('s-cancelled', 'Disabled')}</td>
           <td style="text-align:right"><button class="btn sm" data-edituser="${u.id}">Edit</button></td></tr>`).join('')}
         </tbody></table></div></div>
@@ -1715,7 +1797,8 @@ function userForm(u = null) {
       <label>Role<select name="role">${options(['staff', 'admin'], u?.role || 'staff')}</select></label>
       ${u ? `<label>Status<select name="active">${options([['1', 'Active'], ['0', 'Disabled']], u.active ? '1' : '0')}</select></label>` : ''}
       <label class="full">${u ? 'Reset password (leave blank to keep)' : 'Temporary password (min 8)'}<input name="password" type="text" ${u ? '' : 'required'} minlength="8" autocomplete="off"></label>
-      <fieldset class="checkset full"><legend>Territory — they see these states first and hear about new sites there</legend>
+      <label class="full check-inline"><input type="checkbox" name="can_review" ${u?.can_review ? 'checked' : ''}> Runs the 10:30 due diligence review (can approve or pass sites; admins always can)</label>
+      <fieldset class="checkset full"><legend>Territory: the states they manage. They see these first and are notified when a site there is approved for a site walk</legend>
         ${[...new Set([...CORE_STATES, ...S.meta.statesInUse, ...String(u?.states || '').split(',').filter(Boolean)])].map((st) => `<label><input type="checkbox" name="st_${st}" ${String(u?.states || '').split(',').includes(st) ? 'checked' : ''}> ${st}</label>`).join('')}</fieldset>
       <div class="modal-foot full"><button type="button" class="btn" data-close>Cancel</button><button class="btn primary">${u ? 'Save' : 'Create user'}</button></div>
     </form>`);
@@ -1723,6 +1806,7 @@ function userForm(u = null) {
     e.preventDefault();
     const d = formData(e.target);
     d.states = Object.keys(d).filter((k) => k.startsWith('st_')).map((k) => k.slice(3));
+    d.can_review = !!d.can_review;
     Object.keys(d).filter((k) => k.startsWith('st_')).forEach((k) => delete d[k]);
     if (u) { d.active = d.active === '1'; if (!d.password) delete d.password; }
     try {
