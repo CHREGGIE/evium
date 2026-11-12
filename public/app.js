@@ -56,11 +56,16 @@ const OPEN_STATUSES = ['active', 'on_hold', 'blocked'];
 const msWhen = (x) => (x.status === 'done' && x.completed_at ? `done ${fdate(x.completed_at)}`
   : x.status === 'in_progress' ? `${x.days_open ?? 0}d in progress${x.overdue ? ` · over ${x.sla_days}d target` : ''}` : '');
 // small row of chips: one per milestone, showing its status
-const msStrip = (p, { names = true, link = false } = {}) => `<span class="ms-strip">${S.meta.milestones.map((m, i) => {
-  const x = p.milestones?.[i] || { status: 'not_started' };
-  const title = `${esc(m.name)}: ${MS_LABEL[x.status]}${msWhen(x) ? ` (${esc(msWhen(x))})` : ''}${link ? ' · click to open' : ''}`;
-  return `<span class="ms ms-${x.status}${x.overdue ? ' ms-overdue' : ''}${link ? ' ms-click' : ''}" title="${title}"${link ? ` data-goto="#/projects/${p.id}/m/${m.id}"` : ''}>${MS_ICON[x.status]}${names ? ` ${esc(m.name)}` : ''}</span>`;
-}).join('')}</span>`;
+const msTrack = (p, { text = true } = {}) => {
+  if (p.phase === 'diligence') return phaseBadge();
+  const xs = S.meta.milestones.map((m, i) => ({ m, x: p.milestones?.[i] || { status: 'not_started' } }));
+  const now = xs.filter((o) => o.x.status === 'in_progress');
+  const next = xs.find((o) => o.x.status === 'not_started');
+  const late = now.some((o) => o.x.overdue);
+  const what = p.ms_complete ? 'Live' : now.length ? `Now: ${now.map((o) => o.m.name).join(', ')}` : next ? `Next: ${next.m.name}` : '';
+  return `<span class="track"><span class="track-bar">${xs.map(({ m, x }) => `<i class="tseg t-${x.status}${x.overdue ? ' late' : ''}" title="${esc(m.name)}: ${MS_LABEL[x.status]}${msWhen(x) ? ` (${esc(msWhen(x))})` : ''}"></i>`).join('')}</span>${text
+    ? `<span class="track-text${late ? ' stale' : ''}">${esc(what)} <span class="muted">${p.ms_done}/${p.ms_total}</span></span>` : ''}</span>`;
+};
 const progressBadge = (p) => (p.phase === 'diligence' ? phaseBadge() : p.ms_complete ? badge('ms-live', '✓ Live') : badge('', `${p.ms_done}/${p.ms_total} done`));
 const isFlagged = (p) => p.ms_overdue > 0 && OPEN_STATUSES.includes(p.status);
 async function api(method, url, body) {
@@ -194,7 +199,6 @@ const territoryToggle = (on) => (myStates().length
   ? `<button type="button" class="chip ${on ? 'active' : ''}" id="mineToggle" title="Only show ${esc(myStates().join(', '))}">★ My territory</button>` : '');
 
 // ---------- notifications ----------
-const NOTIF_ICON = { calendar: '📅', rebate: '$', handoff: '→', site_walk: '→', review: '?', mention: '@', message: '💬', reminder: '⏰', reminder_set: '⏰', territory: '★' };
 let bellTimer = null;
 async function refreshBell() {
   if (!S.me) return;
@@ -215,7 +219,7 @@ async function openNotifications() {
   const card = openModal(`<div class="modal-head"><h2 style="margin:0">Notifications</h2>
       <span style="display:flex;gap:8px;align-items:center">${d.unread ? '<button class="btn sm" id="readAll">Mark all read</button>' : ''}<button class="x" data-close aria-label="Close">×</button></span></div>
     <div class="notif-list">${d.items.map((n) => `<button type="button" class="notif ${n.read_at ? '' : 'unread'}" data-n="${n.id}">
-        <span class="notif-icon">${NOTIF_ICON[n.kind] || '•'}</span>
+        <span class="notif-icon">${esc(initials(n.actor_name || 'Evium'))}</span>
         <span class="notif-text">${esc(n.text)}<span class="muted small">${ago(n.created_at)}</span></span></button>`).join('')
       || '<div class="empty">Nothing yet. You\'ll see @mentions, reminders, messages on your sites and new sites in your territory here.</div>'}</div>`);
   $('#readAll', card)?.addEventListener('click', async () => { await api('POST', '/api/notifications/read', {}); await refreshBell(); closeModal(); toast('All caught up'); });
@@ -278,7 +282,7 @@ function attachMentionPicker(ta) {
 const addDays = (n) => { const d = new Date(); d.setDate(d.getDate() + n); return d.toISOString().slice(0, 10); };
 function reminderModal(p, milestoneId, after) {
   const m = milestoneId ? msById(milestoneId) : null;
-  const card = openModal(`${modalHead('⏰ Set a follow-up reminder')}
+  const card = openModal(`${modalHead('Set a follow-up reminder')}
     <p class="muted small" style="margin-top:-6px">${esc(p.address || p.name)} · ${esc(p.code)}. On the day, it shows on the Dashboard and in Notifications.</p>
     <form class="form-grid">
       <label class="full">What to do<input name="text" required value="${esc(m ? `Follow up on ${m.name}` : 'Follow up')}"></label>
@@ -316,7 +320,7 @@ async function projectCalendarCard(p, el) {
 }
 async function projectRemindersCard(p, el) {
   const rows = await api('GET', `/api/projects/${p.id}/reminders`);
-  el.innerHTML = `<div style="display:flex;justify-content:space-between;align-items:center"><h2 style="margin:0">⏰ Reminders</h2><button class="btn sm" id="addReminder">+ Add</button></div>
+  el.innerHTML = `<div style="display:flex;justify-content:space-between;align-items:center"><h2 style="margin:0">Reminders</h2><button class="btn sm" id="addReminder">+ Add</button></div>
     <div class="rem-list">${rows.map((r) => reminderLine(r, { showSite: false })).join('') || '<div class="muted small" style="margin-top:8px">No follow-ups set.</div>'}</div>`;
   $('#addReminder', el).onclick = () => reminderModal(p, null, () => projectRemindersCard(p, el));
   bindReminderLines(el, () => projectRemindersCard(p, el));
@@ -359,7 +363,7 @@ const deadlineText = (d) => {
 };
 const needsCheck = (r) => (r.verified ? '' : badge('rb-check', 'Sample · needs checking'));
 // small clickable chip for a rebate on a site
-const rebateChip = (r) => `<button type="button" class="rebate-chip" data-rebate="${r.id}" title="Show rebate details">💲 ${esc(r.name)}${r.status && r.status !== 'open' ? ` <span class="muted">(${esc(REBATE_STATUS[r.status] || r.status)})</span>` : ''}</button>`;
+const rebateChip = (r) => `<button type="button" class="rebate-chip" data-rebate="${r.id}" title="Show rebate details">${esc(r.name)}${r.status && r.status !== 'open' ? ` <span class="muted">(${esc(REBATE_STATUS[r.status] || r.status)})</span>` : ''}</button>`;
 // a plain clickable line for a rebate on a site; opens the full rebate details
 const rebateLine = (r, extra = '') => `<button type="button" class="rebate-line" data-rebate="${r.id}" title="Show everything about this rebate">
     <span class="rl-text"><span class="rl-name">${esc(r.name)}</span>${extra || r.amount_text ? `<span class="rl-sub">${esc(extra || r.amount_text)}</span>` : ''}</span><span class="rl-chev">›</span></button>`;
@@ -378,7 +382,7 @@ async function renderRebates() {
       <div class="rcard-top"><b>${esc(r.name)}</b>${rebateStatusBadge(r.status)}</div>
       <div class="muted small">${esc(REBATE_KIND[r.kind])}${r.provider ? ` · ${esc(r.provider)}` : ''}${r.utility_name ? ` · ${esc(r.utility_name)} customers` : ''}</div>
       ${r.amount_text ? `<div class="rcard-amt">${esc(r.amount_text)}</div>` : ''}
-      ${r.offer ? `<div class="small rcard-offer">🔌 ${esc(r.offer.split('\n')[0])}</div>` : ''}
+      ${r.offer ? `<div class="small rcard-offer">${esc(r.offer.split('\n')[0])}</div>` : ''}
       <div class="rcard-foot small">
         ${r.deadline ? `<span class="${daysUntil(r.deadline) != null && daysUntil(r.deadline) <= 30 && r.status !== 'closed' ? 'stale' : 'muted'}">${esc(deadlineText(r.deadline))}</span>` : '<span class="muted">No deadline listed</span>'}
         <span class="muted">${r.site_count ? `${r.site_count} site${r.site_count === 1 ? '' : 's'}` : ''}</span>
@@ -439,7 +443,7 @@ async function rebateInfo(id) {
       ${r.url ? `<dt>Program page</dt><dd><a href="${esc(r.url)}" target="_blank" rel="noopener">${esc(r.url.replace(/^https?:\/\//, '').slice(0, 60))} ↗</a></dd>` : ''}
     </dl>
     ${r.summary ? `<h3>What it is</h3><p style="white-space:pre-wrap;margin-top:0">${esc(r.summary)}</p>` : ''}
-    ${r.offer ? `<div class="offer-box"><h3 style="margin-bottom:4px">🔌 Chargers we can offer <span class="muted small" style="font-weight:500">— internal, for sales</span></h3><div style="white-space:pre-wrap">${esc(r.offer)}</div></div>` : ''}
+    ${r.offer ? `<div class="offer-box"><h3 style="margin-bottom:4px">Chargers we can offer <span class="muted small" style="font-weight:500">— internal, for sales</span></h3><div style="white-space:pre-wrap">${esc(r.offer)}</div></div>` : ''}
     ${reqs.length ? `<h3 style="margin-top:14px">Requirements</h3><ul class="req-list">${reqs.map((x) => `<li>${esc(x)}</li>`).join('')}</ul>` : ''}
     ${r.notes ? `<h3 style="margin-top:14px">Notes</h3><div class="small" style="white-space:pre-wrap">${esc(r.notes)}</div>` : ''}
     <h3 style="margin-top:14px">Sites going after it <span class="muted small">${r.sites.length}</span></h3>
@@ -546,7 +550,7 @@ async function renderUtility(id) {
         <div class="card"><h2>Sites with ${esc(u.name)} <span class="muted small">${u.sites.length} · ${live.length} live</span></h2>
           ${u.sites.length ? `<div class="table-wrap" style="box-shadow:none"><table><thead><tr><th>Site</th><th>Milestones</th><th>Progress</th></tr></thead><tbody>
           ${u.sites.map((p) => `<tr class="clickable" data-href="#/projects/${p.id}"><td><b>${esc(p.address || p.name)}</b><div class="muted small">${esc(p.code)} · ${esc(p.name)}</div></td>
-            <td>${p.phase === 'diligence' ? '' : msStrip(p, { names: false })}</td><td>${progressBadge(p)}</td></tr>`).join('')}</tbody></table></div>` : '<div class="empty">No sites use this utility yet.</div>'}</div>
+            <td>${p.phase === 'diligence' ? '' : msTrack(p)}</td><td>${progressBadge(p)}</td></tr>`).join('')}</tbody></table></div>` : '<div class="empty">No sites use this utility yet.</div>'}</div>
         <div class="card"><h2>Rebates for ${esc(u.name)} customers</h2>
           ${u.rebates.length ? u.rebates.map((r) => `<div style="margin-bottom:6px">${rebateChip(r)} <span class="muted small">${esc(r.amount_text || '')}</span></div>`).join('') : '<div class="muted small">None on the Rebates board.</div>'}</div>
       </div>
@@ -645,7 +649,7 @@ async function renderMap() {
       <aside class="map-side card"><h2>Not on the map yet <span class="muted small">${off.length}</span></h2>
         <p class="muted small" style="margin-top:-6px">These need a full address, or place the pin yourself.</p>
         ${off.map((p) => `<div class="off-row"><div><b>${esc(p.address || p.name)}</b><div class="muted small">${esc([p.city, p.state].filter(Boolean).join(', ') || 'No address')} · ${esc(p.code)}</div></div>
-          <span style="display:flex;gap:4px;flex-wrap:wrap"><button class="btn sm" data-locate="${p.id}" ${p.address || p.city ? '' : 'disabled'}>Find address</button><button class="btn sm" data-place="${p.id}">Place pin</button></span></div>`).join('') || '<div class="muted small">Every site has a pin. 👍</div>'}
+          <span style="display:flex;gap:4px;flex-wrap:wrap"><button class="btn sm" data-locate="${p.id}" ${p.address || p.city ? '' : 'disabled'}>Find address</button><button class="btn sm" data-place="${p.id}">Place pin</button></span></div>`).join('') || '<div class="muted small">Every site has a pin.</div>'}
       </aside></div>`;
   const form = $('#mFilters');
   const go = (over = {}) => {
@@ -681,7 +685,7 @@ async function renderMap() {
     const mk = L.marker([p.lat, p.lng], { icon, draggable: true, title: p.address || p.name }).addTo(map);
     mk.bindPopup(`<div class="map-pop"><b>${esc(p.address || p.name)}</b><div class="muted small">${esc(p.code)} · ${esc(p.name)}</div>
       <div style="margin:6px 0">${progressBadge(p)} ${p.status !== 'active' ? statusBadge(p.status) : ''}</div>
-      ${p.phase === 'pipeline' ? msStrip(p, { names: false }) : ''}
+      ${p.phase === 'pipeline' ? msTrack(p) : ''}
       <div style="margin-top:8px"><a href="#/projects/${p.id}">Open project →</a></div>
       <div class="muted small" style="margin-top:4px">Wrong spot? Drag the pin.</div></div>`);
     const start = mk.getLatLng();
@@ -840,14 +844,16 @@ const parseYmd = (s) => { const [y, m, d] = s.split('-').map(Number); return new
 const addDaysTo = (d, n) => { const x = new Date(d); x.setDate(x.getDate() + n); return x; };
 const hhmm = (t) => { const [h, m] = t.split(':').map(Number); return `${((h + 11) % 12) + 1}${m ? `:${pad2(m)}` : ''}${h < 12 ? 'am' : 'pm'}`; };
 const evTime = (e) => { const [d1, t1] = e.starts_at.split('T'); const [d2, t2] = e.ends_at.split('T'); return d1 === d2 ? `${hhmm(t1)}–${hhmm(t2)}` : `${fdate(d1)} ${hhmm(t1)} – ${fdate(d2)} ${hhmm(t2)}`; };
+// short time for lists: "10am–11am", or "8am · until Nov 20" for multi-day bookings
+const evShort = (e) => { const [d1, t1] = e.starts_at.split('T'); const [d2, t2] = e.ends_at.split('T'); return d1 === d2 ? `${hhmm(t1)}–${hhmm(t2)}` : `${hhmm(t1)} · until ${new Date(`${d2}T12:00`).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}`; };
 const evTitle = (e) => e.title || `${EVENT_KIND[e.kind]}${e.project_name ? `: ${e.project_name}` : ''}`;
 const evChip = (e, { showDate = false } = {}) => `<button type="button" class="ev ${e.status !== 'scheduled' ? `is-${e.status}` : ''}" data-ev="${e.id}" style="--ev:${EVENT_COLOR[e.kind]}" title="${esc(evTitle(e))} · ${esc(evTime(e))}">
     <span class="ev-time">${showDate ? `${fdate(e.starts_at.slice(0, 10))} · ` : ''}${hhmm(e.starts_at.slice(11))}</span><span class="ev-name">${esc(e.project_name || e.title || EVENT_KIND[e.kind])}</span>${e.contractor_company ? `<span class="ev-name muted">${esc(e.contractor_company)}</span>` : ''}</button>`;
 // a list of bookings (used on a site, a milestone and the dashboard)
 const evList = (rows, { empty = 'Nothing booked.', showSite = true } = {}) => (rows.length ? `<div class="ev-list">${rows.map((e) => `<button type="button" class="ev-row" data-ev="${e.id}">
     <span class="ev-bar" style="background:${EVENT_COLOR[e.kind]}"></span>
-    <span class="ev-when"><b>${esc(fdate(e.starts_at.slice(0, 10)))}</b><span class="muted small">${esc(evTime(e))}</span></span>
-    <span class="ev-what"><b>${esc(EVENT_KIND[e.kind])}</b>${showSite && e.project_name ? ` · ${esc(e.address || e.project_name)}` : ''}<span class="muted small">${esc([e.contractor_company, ...e.people.map((x) => x.name)].filter(Boolean).join(' · ') || 'Nobody assigned')}</span></span>
+    <span class="ev-when"><b>${esc(fdate(e.starts_at.slice(0, 10)))}</b><span class="muted small">${esc(evShort(e))}</span></span>
+    <span class="ev-what"><span class="ev-line"><b>${esc(EVENT_KIND[e.kind])}</b>${showSite && e.project_name ? ` · ${esc(e.address || e.project_name)}` : ''}</span><span class="muted small">${esc([e.contractor_company, ...e.people.map((x) => x.name)].filter(Boolean).join(' · ') || 'Nobody assigned')}</span></span>
   </button>`).join('')}</div>` : `<div class="work-empty">${esc(empty)}</div>`);
 const bindEvents = (root, after) => $$('[data-ev]', root).forEach((b) => (b.onclick = (e) => { e.stopPropagation(); eventModal(Number(b.dataset.ev), after); }));
 
@@ -1311,7 +1317,7 @@ function defaultLayout(u) {
   const lead = u.role === 'admin' || u.is_exec;
   if (lead) main.push('kpis', 'attention', 'ms_chart');
   else main.push('sites');
-  return { main, side: ['calendar', 'reminders', 'tickets', 'activity'] };
+  return { main, side: ['calendar', 'reminders', 'tickets'] };
 }
 const validLayout = (l) => {
   const ok = new Set(widgetIds());
@@ -1330,14 +1336,16 @@ async function renderDashboard(asId) {
   const first = who.name.split(' ')[0];
 
   // ---- each widget: [count, body] ----
+  const LIM = 5;
+  const more = (n, href) => (n > LIM ? `<a class="work-more" href="${href}">See all ${n} ›</a>` : '');
   const W = {
     dd: () => [mine.dd.length, `${mine.dd_waiting ? `<div class="muted small" style="margin:-4px 0 8px">${mine.dd_waiting} already waiting for the 10:30 review.</div>` : ''}
-      <div class="work-list">${mine.dd.map((p) => `<div class="work-row">
+      <div class="work-list">${mine.dd.slice(0, LIM).map((p) => `<div class="work-row">
           <a class="work-link" href="#/projects/${p.id}">${workSite(p)}</a>
           <span class="work-meta">${p.dd_review_note ? `<span class="work-flag">Sent back: ${esc(p.dd_review_note)}</span>` : `${p.days_in_phase} day${p.days_in_phase === 1 ? '' : 's'} waiting`}</span>
-          <button class="btn sm ${p.dd_review_note ? '' : 'primary'}" data-assess="${p.id}">${p.dd_rating ? 'Finish' : 'Assess'}</button></div>`).join('') || '<div class="work-empty">All caught up.</div>'}</div>`],
-    review: () => [mine.review.length, `<div class="work-list">${mine.review.map((p) => `<a class="work-row" href="#/diligence?tab=review">${workSite(p)}<span class="work-meta">${ratingView(p.dd_rating)}</span><span class="work-chev">›</span></a>`).join('')
-      || '<div class="work-empty">Nothing waiting for review.</div>'}</div>`],
+          <button class="btn sm ${p.dd_review_note ? '' : 'primary'}" data-assess="${p.id}">${p.dd_rating ? 'Finish' : 'Assess'}</button></div>`).join('') || '<div class="work-empty">All caught up.</div>'}${more(mine.dd.length, '#/diligence?tab=new')}</div>`],
+    review: () => [mine.review.length, `<div class="work-list">${mine.review.slice(0, LIM).map((p) => `<a class="work-row" href="#/diligence?tab=review">${workSite(p)}<span class="work-meta">${ratingView(p.dd_rating)}</span><span class="work-chev">›</span></a>`).join('')
+      || '<div class="work-empty">Nothing waiting for review.</div>'}${more(mine.review.length, '#/diligence?tab=review')}</div>`],
     grants: () => [mine.grants.deadlines.length + mine.grants.no_rebate.length + mine.grants.needs_check.length, `
       <div class="work-sub">Deadlines in the next 60 days <span class="muted">${mine.grants.deadlines.length}</span></div>
       <div class="work-list">${mine.grants.deadlines.map((r) => `<button type="button" class="work-row as-btn" data-rebate="${r.id}"><span class="work-site"><b>${esc(r.name)}</b><span class="muted small">${esc(regionName(r.state))}</span></span>
@@ -1347,8 +1355,8 @@ async function renderDashboard(asId) {
       <div class="work-sub">Needs checking <span class="muted">${mine.grants.needs_check.length}</span></div>
       <div class="work-list">${mine.grants.needs_check.map((r) => `<button type="button" class="work-row as-btn" data-rebate="${r.id}"><span class="work-site"><b>${esc(r.name)}</b><span class="muted small">${esc(regionName(r.state))} · ${esc(REBATE_KIND[r.kind])}</span></span>
           <span class="work-meta">${rebateStatusBadge(r.status)}</span><span class="work-chev">›</span></button>`).join('') || '<div class="work-empty">Every rebate has been checked.</div>'}</div>`],
-    sites: () => [mine.sites.length, `<div class="work-list">${mine.sites.map((p) => `<a class="work-row ${isFlagged(p) ? 'late' : ''}" href="#/projects/${p.id}">${workSite(p)}
-        <span class="work-meta">${p.phase === 'diligence' ? phaseBadge() : msStrip(p, { names: false })}</span><span class="work-chev">›</span></a>`).join('') || '<div class="work-empty">No sites assigned.</div>'}</div>`],
+    sites: () => [mine.sites.length, `<div class="work-list">${mine.sites.slice(0, LIM + 1).map((p) => `<a class="work-row ${isFlagged(p) ? 'late' : ''}" href="#/projects/${p.id}">${workSite(p)}
+        <span class="work-meta">${p.phase === 'diligence' ? phaseBadge() : msTrack(p)}</span><span class="work-chev">›</span></a>`).join('') || '<div class="work-empty">No sites assigned.</div>'}</div>`],
     kpis: () => [null, `<div class="kpis in-widget">
       <a class="kpi" href="#/diligence?tab=new"><div class="l">To assess</div><div class="v">${num(t.to_assess)} <span class="small muted">${num(t.to_review)} for review</span></div></a>
       <a class="kpi" href="#/pipeline"><div class="l">In progress</div><div class="v">${num(t.open_projects)}</div></a>
@@ -1364,29 +1372,27 @@ async function renderDashboard(asId) {
           <div class="small" style="text-align:right">${m.overdue ? `<span class="stale">${m.overdue} late</span>` : `<span class="muted">${m.not_needed ? `${m.not_needed} n/a` : ''}</span>`}</div></div>`;
       }).join('')}</div>
       <div class="legend small muted"><span><i class="seg-done"></i>Done</span><span><i class="seg-prog"></i>In progress</span><span><i class="seg-todo"></i>Not started</span></div>`],
-    attention: () => [d.stalled.length, d.stalled.length ? `<div class="work-list">${d.stalled.map((p) => `<a class="work-row late" href="#/projects/${p.id}">${workSite(p)}
+    attention: () => [d.stalled.length, d.stalled.length ? `<div class="work-list">${d.stalled.slice(0, LIM).map((p) => `<a class="work-row late" href="#/projects/${p.id}">${workSite(p)}
         <span class="work-meta"><span class="stale">${p.milestones.map((x, i) => (x.overdue ? `${esc(S.meta.milestones[i].name)} ${x.days_open}d` : '')).filter(Boolean).join(' · ') || esc(label(p.status))}</span>
-          <span class="muted">${esc(p.owner_name || '')}</span></span><span class="work-chev">›</span></a>`).join('')}</div>` : '<div class="work-empty">Nothing stalled.</div>'],
-    reminders: () => [mine.reminders.filter((r) => r.due_on <= today()).length || null, `<div class="rem-list ${own ? '' : 'readonly'}">${mine.reminders.slice(0, 12).map((r) => reminderLine(r, { showSite: true })).join('') || '<div class="work-empty">No follow-ups.</div>'}</div>`],
-    tickets: () => [d.myTickets.length, d.myTickets.length ? `<div class="feed">${d.myTickets.map((x) => `<div class="feed-item"><a href="#/tickets/${x.id}"><b>#${x.id} ${esc(x.title)}</b></a>
-        <div class="muted small">${esc(x.code)} · ${esc(x.project_name)}</div>
-        <div style="margin-top:4px;display:flex;gap:6px;flex-wrap:wrap">${ticketBadge(x.status)} ${prioBadge(x.priority)} ${x.due_date ? `<span class="small ${x.due_date < today() ? 'stale' : 'muted'}">due ${fdate(x.due_date)}</span>` : ''}</div></div>`).join('')}</div>` : '<div class="work-empty">No open tickets.</div>'],
-    calendar: () => [mine.events.length, evList(mine.events, { empty: 'Nothing booked in the next two weeks.' })],
-    activity: () => [null, `<div class="feed">${d.recent.map(activityItem).join('') || '<div class="work-empty">No activity yet.</div>'}</div>`],
+          <span class="muted">${esc(p.owner_name || '')}</span></span><span class="work-chev">›</span></a>`).join('')}${more(d.stalled.length, '#/pipeline?progress=overdue')}</div>` : '<div class="work-empty">Nothing stalled.</div>'],
+    reminders: () => [mine.reminders.filter((r) => r.due_on <= today()).length || null, `<div class="rem-list ${own ? '' : 'readonly'}">${mine.reminders.slice(0, LIM).map((r) => reminderLine(r, { showSite: true })).join('') || '<div class="work-empty">No follow-ups.</div>'}</div>`],
+    tickets: () => [d.myTickets.length, d.myTickets.length ? `<div class="work-list">${d.myTickets.slice(0, LIM).map((x) => `<a class="work-row" href="#/tickets/${x.id}">
+        <span class="work-site"><b>${esc(x.title)}</b><span class="muted small">${esc(x.code)} · ${esc(x.project_name)}</span></span>
+        <span class="work-meta">${x.due_date ? `<span class="${x.due_date < today() ? 'stale' : ''}">due ${fdate(x.due_date)}</span>` : ''}${['urgent', 'high'].includes(x.priority) ? `<span>${esc(label(x.priority))}</span>` : ''}</span><span class="work-chev">›</span></a>`).join('')}${more(d.myTickets.length, '#/tickets?assignee_id=me')}</div>` : '<div class="work-empty">No open tickets.</div>'],
+    calendar: () => [mine.events.length, evList(mine.events.slice(0, LIM), { empty: 'Nothing booked in the next two weeks.' }) + more(mine.events.length, '#/calendar')],
+    activity: () => [null, `<div class="feed">${d.recent.slice(0, 8).map(activityItem).join('') || '<div class="work-empty">No activity yet.</div>'}</div>`],
   };
   const msWidget = (mid) => {
     const g = mine.milestones.find((x) => String(x.id) === String(mid));
     if (!g) return [null, '<div class="work-empty">This milestone no longer exists.</div>'];
-    return [g.in_progress.length + g.up_next.length, `${mine.scoped.length ? `<div class="muted small" style="margin:-4px 0 6px">${esc(mine.scoped.join(', '))}</div>` : ''}
-      <div class="work-sub">In progress <span class="muted">${g.in_progress.length}</span></div>
-      <div class="work-list">${g.in_progress.map((p) => `<a class="work-row ${p.ms.overdue ? 'late' : ''}" href="#/projects/${p.id}/m/${g.id}">${workSite(p)}
-          <span class="work-meta"><span class="ms-progress"><span style="width:${p.ms.steps_total ? Math.round((p.ms.steps_done / p.ms.steps_total) * 100) : 0}%"></span></span>
-            ${p.ms.steps_done} of ${p.ms.steps_total} steps · <span class="${p.ms.overdue ? 'stale' : ''}">${p.ms.days_open ?? 0} days${p.ms.overdue ? ' (late)' : ''}</span></span>
-          <span class="work-chev">›</span></a>`).join('') || '<div class="work-empty">None in progress.</div>'}</div>
-      <div class="work-sub">Up next <span class="muted">${g.up_next.length}</span></div>
-      <div class="work-list">${g.up_next.map((p) => `<a class="work-row" href="#/projects/${p.id}/m/${g.id}">${workSite(p)}
-          <span class="work-meta">${p.prev ? `${esc(p.prev.name)} ${p.prev.status === 'done' ? `done ${fdate(p.prev.completed_at)}` : 'not needed'}` : 'Ready to start'}${p.status !== 'active' ? ` · ${esc(label(p.status))}` : ''}</span>
-          <span class="work-chev">›</span></a>`).join('') || '<div class="work-empty">Nothing waiting to start.</div>'}</div>`];
+    const all = `#/pipeline?milestone_id=${g.id}&ms_status=todo`;
+    const section = (title, list, row) => (list.length ? `<div class="work-sub">${title} <span class="muted">${list.length}</span></div>
+      <div class="work-list">${list.slice(0, LIM).map(row).join('')}${more(list.length, all)}</div>` : '');
+    const body = section('In progress', g.in_progress, (p) => `<a class="work-row ${p.ms.overdue ? 'late' : ''}" href="#/projects/${p.id}/m/${g.id}">${workSite(p)}
+        <span class="work-meta"><span class="${p.ms.overdue ? 'stale' : ''}">${p.ms.days_open ?? 0} days${p.ms.overdue ? ' · late' : ''}</span><span class="muted">${p.ms.steps_done}/${p.ms.steps_total} steps</span></span><span class="work-chev">›</span></a>`)
+      + section('Up next', g.up_next, (p) => `<a class="work-row" href="#/projects/${p.id}/m/${g.id}">${workSite(p)}
+        <span class="work-meta muted">${p.prev ? `${esc(p.prev.name)} ${p.prev.status === 'done' ? `done ${fdate(p.prev.completed_at)}` : 'not needed'}` : 'Ready to start'}</span><span class="work-chev">›</span></a>`);
+    return [g.in_progress.length + g.up_next.length, body || '<div class="work-empty">Nothing on your list.</div>'];
   };
   const widget = (id, col, i, len) => {
     const [count, body] = id.startsWith('ms:') ? msWidget(id.slice(3)) : W[id]();
@@ -1481,10 +1487,9 @@ function dutiesModal() {
 }
 
 function activityItem(a) {
-  const icons = { quote: '$', event_booked: '📅', sent_to_review: '★', assessed: '★', review_info: '?', review_passed: '✕', reopened: '↺', step_done: '✓', reminder_set: '⏰', message: '💬', milestone_updated: '🏁', moved_to_pipeline: '✅', project_created: '🆕', stage_changed: '➡️', status_changed: '🚦', project_updated: '✏️', ticket_created: '🎫', ticket_updated: '🎫', ticket_deleted: '🗑️', documents_uploaded: '📎', document_deleted: '🗑️', note: '📝' };
   const proj = a.project_name ? ` <a href="#/projects/${a.project_id}">${esc(a.code)}</a>` : '';
   const body = a.action === 'note' ? `<div class="note">${esc(a.detail)}</div>` : `<span>${esc(a.detail || '')}</span>`;
-  return `<div class="feed-item">${icons[a.action] || '•'} <b>${esc(a.user_name || 'System')}</b> <span class="muted">${esc(label(a.action))}</span>${proj}
+  return `<div class="feed-item"><b>${esc(a.user_name || 'System')}</b> <span class="muted">${esc(label(a.action))}</span>${proj}
     <span class="muted small"> · ${ago(a.created_at)}</span><div>${body}</div></div>`;
 }
 
@@ -1700,8 +1705,7 @@ async function renderPipeline() {
     return `<div class="prow ${cls} ${open ? 'open' : ''}">
       <button class="prow-main" type="button" data-row="${p.id}" aria-expanded="${open}" title="Click to see milestones · double-click to open the site">
         <span class="prow-addr"><b>${esc(line1)}</b><span class="muted small">${esc(line2)}</span></span>
-        ${msStrip(p)}
-        <span class="prow-prog">${progressBadge(p)}</span>
+        ${msTrack(p)}
         <span class="prow-extra small">${p.status !== 'active' ? statusBadge(p.status) : ''}${p.estimated_value ? `<span class="muted">${money(p.estimated_value)}</span>` : ''}</span>
         <span class="caret muted">${open ? '▾' : '▸'}</span>
       </button>
@@ -1710,8 +1714,8 @@ async function renderPipeline() {
         <div class="prow-facts small">
           <span>${p.customer_name ? esc(p.customer_name) : '<span class="muted">No customer</span>'}</span>
           ${p.charger_count ? `<span>${p.charger_count}× ${esc(p.charger_type || 'ports')}</span>` : ''}
-          ${p.owner_name ? `<span>👤 ${esc(p.owner_name)}</span>` : ''}
-          ${p.open_tickets ? `<span>🎫 ${p.open_tickets} open</span>` : ''}
+          ${p.owner_name ? `<span>Owner: ${esc(p.owner_name)}</span>` : ''}
+          ${p.open_tickets ? `<span>${p.open_tickets} open ticket${p.open_tickets === 1 ? '' : 's'}</span>` : ''}
           ${p.hold_reason && p.status !== 'active' ? `<span style="color:var(--warn)">${esc(p.hold_reason)}</span>` : ''}
           ${p.rebates.map(rebateChip).join('')}
           <button type="button" class="btn sm" data-sitechat="${p.id}">Site chat${p.msg_count ? ` (${p.msg_count})` : ''}</button>
@@ -1727,7 +1731,7 @@ async function renderPipeline() {
     return `<section class="lane ${isOpen ? '' : 'collapsed'}">
       <button class="lane-head" type="button" data-toggle="${esc(k)}">
         <span class="caret">${isOpen ? '▾' : '▸'}</span>
-        <span class="lane-title">${k === 'none' ? 'No state set' : `${esc(stateName(k))} <span class="muted">${esc(k)}</span>`}${myStates().includes(k) ? ' <span class="badge ms-live">★ Your territory</span>' : ''}</span>
+        <span class="lane-title">${k === 'none' ? 'No state set' : `${esc(stateName(k))} <span class="muted">${esc(k)}</span>`}${myStates().includes(k) ? ' <span class="terr" title="Your territory">★</span>' : ''}</span>
         <span class="sub">${list.length} project${list.length === 1 ? '' : 's'} · ${num(sum(list, 'charger_count'))} ports · ${money(sum(list, 'estimated_value'))}</span>
       </button>
       ${isOpen ? `<div class="prows">${list.map(row).join('')}</div>` : ''}
@@ -1735,21 +1739,25 @@ async function renderPipeline() {
   };
 
   const msOpts = S.meta.milestones.map((m) => [m.id, m.name]);
+  let moreOn = (params.get('status') && params.get('status') !== 'open') || !!q.get('owner_id');
   view.innerHTML = `
     <div class="page-head"><h1>Pipeline <span class="muted small">${all.length}</span></h1>
       <div class="actions">${territoryToggle(mine)}<a class="btn" href="#/diligence">Due diligence →</a></div></div>
     <form class="filters" id="pFilters">
       <select name="milestone_id">${options(msOpts, q.get('milestone_id'), { blank: 'Any milestone' })}</select>
-      <select name="ms_status" ${q.get('milestone_id') ? '' : 'disabled'}>${options([['todo', 'Still to do'], ...MS_STATUSES.map((s) => [s, MS_LABEL[s]]), ['overdue', 'Running late']], q.get('ms_status'), { blank: 'Any status' })}</select>
+      <select name="ms_status" class="${q.get('milestone_id') ? '' : 'hidden'}">${options([['todo', 'Still to do'], ...MS_STATUSES.map((s) => [s, MS_LABEL[s]]), ['overdue', 'Running late']], q.get('ms_status'), { blank: 'Any status' })}</select>
       <select name="progress">${options([['incomplete', 'Still in progress'], ['complete', 'Live (all done)'], ['overdue', 'Running late']], q.get('progress'), { blank: 'All projects' })}</select>
-      <select name="status">${options([['open', 'Open (active/hold/blocked)'], ['active', 'Active'], ['on_hold', 'On hold'], ['blocked', 'Blocked'], ['won', 'Won'], ['', 'All statuses']], params.get('status'))}</select>
-      <select name="owner_id">${options(S.meta.users.map((u) => [u.id, u.name]), q.get('owner_id'), { blank: 'All owners' })}</select>
+      <button type="button" class="btn sm ghost" id="moreF">${moreOn ? 'Fewer filters' : 'More filters'}</button>
+      <span id="moreFBox" class="more-f ${moreOn ? '' : 'hidden'}">
+        <select name="status">${options([['open', 'Open (active/hold/blocked)'], ['active', 'Active'], ['on_hold', 'On hold'], ['blocked', 'Blocked'], ['won', 'Won'], ['', 'All statuses']], params.get('status'))}</select>
+        <select name="owner_id">${options(S.meta.users.map((u) => [u.id, u.name]), q.get('owner_id'), { blank: 'All owners' })}</select>
+      </span>
     </form>
     <div class="chips">
       <button class="chip ${stateSel ? '' : 'active'}" data-state="">All states <span>${all.length}</span></button>
       ${keys.map((k) => `<button class="chip ${stateSel === k ? 'active' : ''}" data-state="${esc(k)}" title="${esc(stateName(k))}">${k === 'none' ? 'No state' : esc(k)} <span>${groups[k].length}</span></button>`).join('')}
     </div>
-    <p class="muted small">Milestones can be finished in any order. ✓ done · ● in progress · ○ not started · – not needed. Click a row to see its milestones; double-click to open the site. A red edge means a milestone is running past its target.</p>
+    <div class="track-legend small muted"><span><i class="tseg t-done"></i>Done</span><span><i class="tseg t-in_progress"></i>In progress</span><span><i class="tseg t-not_started"></i>Not started</span><span><i class="tseg t-in_progress late"></i>Late</span><span class="tl-tip">Click a site for details · double-click to open it</span></div>
     ${shown.map(lane).join('') || `<div class="card empty">${stateSel ? 'No projects in this state.' : 'No projects match. Finish due diligence on a property to move it here.'}</div>`}`;
 
   const form = $('#pFilters');
@@ -1762,6 +1770,7 @@ async function renderPipeline() {
     location.hash = `#/pipeline?${p}`;
   };
   $('#mineToggle')?.addEventListener('click', () => go({ mine: !mine }));
+  $('#moreF').onclick = () => { moreOn = !moreOn; $('#moreFBox').classList.toggle('hidden', !moreOn); $('#moreF').textContent = moreOn ? 'Fewer filters' : 'More filters'; };
   bindRebateChips();
   $$('select', form).forEach((s) => (s.onchange = () => go()));
   $$('.chip[data-state]', view).forEach((c) => (c.onclick = () => go({ state: c.dataset.state })));
@@ -1809,7 +1818,7 @@ async function renderProjects() {
     <tbody>${rows.map((p) => `<tr class="clickable" data-href="#/projects/${p.id}">
       <td><b>${esc(p.name)}</b><div class="muted small">${esc(p.code)}${p.city ? ` · ${esc(p.city)}${p.state ? ', ' + esc(p.state) : ''}` : ''}</div></td>
       <td>${esc(p.customer_name || '—')}</td>
-      <td>${p.phase === 'diligence' ? '<span class="muted small">—</span>' : msStrip(p, { names: false })}</td>
+      <td>${p.phase === 'diligence' ? '<span class="muted small">—</span>' : msTrack(p)}</td>
       <td>${progressBadge(p)}</td>
       <td>${statusBadge(p.status)}</td>
       <td>${p.charger_count ? `${p.charger_count} <span class="muted small">${esc(p.charger_type || '')}</span>` : '—'}</td>
@@ -1949,7 +1958,7 @@ async function rebatePeek(id) {
     ${r.amount_text ? `<div><b>${esc(r.amount_text)}</b></div>` : ''}
     ${r.deadline ? `<div class="small muted">${esc(deadlineText(r.deadline))}</div>` : ''}
     ${r.summary ? `<p class="small" style="white-space:pre-wrap">${esc(r.summary)}</p>` : ''}
-    ${r.offer ? `<div class="offer-box small"><b>🔌 Chargers we can offer:</b> <span style="white-space:pre-wrap">${esc(r.offer)}</span></div>` : ''}
+    ${r.offer ? `<div class="offer-box small"><b>Chargers we can offer:</b> <span style="white-space:pre-wrap">${esc(r.offer)}</span></div>` : ''}
     ${reqs.length ? `<div class="small" style="margin-top:8px"><b>Requirements</b><ul class="req-list">${reqs.map((x) => `<li>${esc(x)}</li>`).join('')}</ul></div>` : ''}`;
   document.body.appendChild(box);
   $('.x', box).onclick = () => box.remove();
@@ -2056,7 +2065,7 @@ async function renderProject(id) {
     <div class="page-head">
       <div><div class="muted small">${dd ? '<a href="#/diligence">Due Diligence</a>' : '<a href="#/projects">Projects</a>'} / ${esc(p.code)}</div>
         <h1>${esc(p.name)}</h1>
-        <div style="display:flex;gap:6px;margin-top:6px;flex-wrap:wrap;align-items:center">${progressBadge(p)} ${statusBadge(p.status)} ${prioBadge(p.priority)}
+        <div style="display:flex;gap:6px;margin-top:6px;flex-wrap:wrap;align-items:center">${progressBadge(p)} ${p.status !== 'active' ? statusBadge(p.status) : ''} ${['high', 'urgent'].includes(p.priority) ? prioBadge(p.priority) : ''}
           ${p.state ? badge('', stateName(p.state)) : ''}
           ${dd ? `<span class="small muted">${p.days_in_phase} days in due diligence</span>`
             : `<span class="small ${isFlagged(p) ? 'stale' : 'muted'}">${p.days_in_phase} days in pipeline${isFlagged(p) ? ` · ${p.ms_overdue} milestone${p.ms_overdue === 1 ? '' : 's'} running late` : ''}</span>`}</div>
@@ -2159,7 +2168,7 @@ function ticketTable(rows, showProject = true) {
   return `<div class="table-wrap"><table><thead><tr><th>#</th><th>Ticket</th>${showProject ? '<th>Project</th>' : ''}<th>Type</th><th>Status</th><th>Priority</th><th>Assignee</th><th>Due</th><th>Updated</th></tr></thead>
   <tbody>${rows.map((t) => `<tr class="clickable" data-ticket="${t.id}">
     <td class="muted">${t.id}</td>
-    <td><b>${esc(t.title)}</b>${t.comment_count ? ` <span class="muted small">💬 ${t.comment_count}</span>` : ''}</td>
+    <td><b>${esc(t.title)}</b>${t.comment_count ? ` <span class="muted small">· ${t.comment_count} comment${t.comment_count === 1 ? '' : 's'}</span>` : ''}</td>
     ${showProject ? `<td><a href="#/projects/${t.project_id}">${esc(t.project_code)}</a><div class="muted small">${esc(t.project_name)}</div></td>` : ''}
     <td>${esc(label(t.type))}</td><td>${ticketBadge(t.status)}</td><td>${prioBadge(t.priority)}</td>
     <td>${esc(t.assignee_name || '—')}</td>
@@ -2211,7 +2220,7 @@ async function openTicket(id, after) {
     </form>
     <h3 style="margin-top:18px">Attachments</h3>
     <div id="tDocs">${docList(t.documents)}</div>
-    <label class="btn sm" style="display:inline-block;margin-top:8px">📎 Attach files<input type="file" multiple hidden id="tFiles"></label>
+    <label class="btn sm" style="display:inline-block;margin-top:8px">Attach files<input type="file" multiple hidden id="tFiles"></label>
     <h3 style="margin-top:18px">Comments & updates</h3>
     <div class="feed">${t.comments.map((c) => `<div class="feed-item"><b>${esc(c.user_name || 'System')}</b> <span class="muted small">${fdatetime(c.created_at)}</span><div class="note">${esc(c.body)}</div></div>`).join('') || '<div class="muted small">No comments yet.</div>'}</div>
     <form id="tComment" class="grid" style="margin-top:10px"><textarea name="body" placeholder="Add a comment, call log, or update…" required></textarea>
