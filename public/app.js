@@ -760,7 +760,8 @@ async function renderMilestone(pid, mid) {
     </div>
     <div class="cols-main">
       <div class="grid" style="gap:16px">
-        ${msBookKind(m) === 'site_walk' ? '<section class="card" id="quotesCard"><div class="work-empty">Loading quotes…</div></section>' : ''}
+        ${msBookKind(m) === 'site_walk' ? `<section class="card" id="quotesCard"><div class="work-empty">Loading quotes…</div></section>
+        <section class="card info-scope">${scopeView(p)}</section>` : ''}
         <section class="card">
           <div class="card-head"><h2>Steps</h2><span class="muted small">${done} of ${steps.length} done</span></div>
           <div class="ms-progress big"><span style="width:${steps.length ? Math.round((done / steps.length) * 100) : 0}%"></span></div>
@@ -793,6 +794,7 @@ async function renderMilestone(pid, mid) {
     </div>`;
 
   const again = () => renderMilestone(pid, mid);
+  $$('[data-scope]', view).forEach((b) => (b.onclick = () => scopeModal(p, again)));
   const setStatus = async (status) => {
     const put = async () => { await api('PUT', `/api/projects/${p.id}/milestones/${m.id}`, { status }); toast(`${m.name}: ${MS_LABEL[status].toLowerCase()}`); again(); };
     try { await put(); } catch (err) {
@@ -1836,6 +1838,47 @@ async function renderProjects() {
   const qi = $('input[name=q]', form); if (f.q) { qi.focus(); qi.setSelectionRange(f.q.length, f.q.length); }
 }
 
+// Site & scope: filled in after the site walk
+const SCOPE_KEYS = ['charger_type', 'charger_count', 'power_kw', 'estimated_value', 'target_live_date', 'description'];
+const hasScope = (p) => SCOPE_KEYS.some((k) => p[k] !== null && p[k] !== undefined && p[k] !== '');
+function scopeFields(v) {
+  const e = S.meta.enums;
+  return `<label>Charger type<select name="charger_type">${options(e.chargerType, v.charger_type, { blank: '—', fmt: (x) => x })}</select></label>
+      <label>Number of ports<input name="charger_count" type="number" min="0" value="${esc(v.charger_count)}"></label>
+      <label>Total power (kW)<input name="power_kw" type="number" min="0" step="any" value="${esc(v.power_kw)}"></label>
+      <label>Estimated value (USD)<input name="estimated_value" type="number" min="0" step="any" value="${esc(v.estimated_value)}"></label>
+      <label>Target live date<input name="target_live_date" type="date" value="${esc(v.target_live_date)}"></label>
+      <label class="full">Scope notes<textarea name="description" placeholder="What the site walk found: panel capacity, trenching, parking layout…">${esc(v.description)}</textarea></label>`;
+}
+function scopeView(p, { head = true } = {}) {
+  const canFill = p.phase === 'pipeline';
+  const h = head ? `<div class="card-head"><h2>Site & scope</h2>${hasScope(p) ? '<button class="link-btn small" data-scope>Edit</button>' : ''}</div>` : '';
+  if (!hasScope(p)) {
+    return `${h}<div class="scope-empty"><div class="muted small">Filled in after the site walk.</div>
+      ${canFill ? '<button class="btn sm" data-scope>Fill in site & scope</button>' : ''}</div>`;
+  }
+  return `${h}<dl class="kv">
+      <dt>Chargers</dt><dd>${p.charger_count ? `${p.charger_count} × ${esc(p.charger_type || 'ports')}` : esc(p.charger_type || '—')}</dd>
+      <dt>Power</dt><dd>${p.power_kw ? `${num(p.power_kw)} kW` : '—'}</dd>
+      <dt>Est. value</dt><dd>${money(p.estimated_value)}</dd>
+      <dt>Target live</dt><dd>${fdate(p.target_live_date)}</dd>
+    </dl>${p.description ? `<div class="scope-notes small">${esc(p.description)}</div>` : ''}`;
+}
+function scopeModal(p, done) {
+  const card = openModal(`${modalHead(`Site & scope · ${esc(p.name)}`)}
+    <p class="muted small" style="margin:-4px 0 12px">What the site walk and the chosen electrician's quote tell us.</p>
+    <form class="form-grid">${scopeFields(p)}
+      <div class="modal-foot full"><button type="button" class="btn" data-close>Cancel</button><button class="btn primary">Save</button></div>
+    </form>`, { wide: true });
+  $('form', card).onsubmit = async (ev) => {
+    ev.preventDefault();
+    const f = Object.fromEntries(new FormData(ev.target));
+    for (const k of ['charger_count', 'power_kw', 'estimated_value']) f[k] = f[k] === '' ? null : Number(f[k]);
+    for (const k of ['charger_type', 'target_live_date']) if (f[k] === '') f[k] = null;
+    try { await api('PATCH', `/api/projects/${p.id}`, f); closeModal(); toast('Site & scope saved'); done(); } catch (err) { fail(err); }
+  };
+}
+
 function projectForm(p = null, { phase = 'diligence' } = {}) {
   const e = S.meta.enums; const v = p || { status: 'active', priority: 'medium', owner_id: S.me.id, tax_credit_eligible: 'unknown' };
   const isDD = p ? p.phase === 'diligence' : phase === 'diligence';
@@ -1875,13 +1918,8 @@ function projectForm(p = null, { phase = 'diligence' } = {}) {
       <label>Contact name<input name="contact_name" value="${esc(v.contact_name)}"></label>
       <label>Contact email<input name="contact_email" type="email" value="${esc(v.contact_email)}"></label>
       <label>Contact phone<input name="contact_phone" value="${esc(v.contact_phone)}"></label>
-      <h3 class="full" style="margin:6px 0 0">Charging scope</h3>
-      <label>Charger type<select name="charger_type">${options(e.chargerType, v.charger_type, { blank: '—', fmt: (x) => x })}</select></label>
-      <label>Number of ports<input name="charger_count" type="number" min="0" value="${esc(v.charger_count)}"></label>
-      <label>Total power (kW)<input name="power_kw" type="number" min="0" step="any" value="${esc(v.power_kw)}"></label>
-      <label>Estimated value (USD)<input name="estimated_value" type="number" min="0" step="any" value="${esc(v.estimated_value)}"></label>
-      <label>Target live date<input name="target_live_date" type="date" value="${esc(v.target_live_date)}"></label>
-      <label class="full">Description / scope notes<textarea name="description">${esc(v.description)}</textarea></label>
+      ${p ? `<h3 class="full" style="margin:6px 0 0">Site & scope <span class="muted small">(filled in after the site walk)</span></h3>
+      ${scopeFields(v)}` : '<p class="full muted small" style="margin:6px 0 0">Chargers, power, value and target date get filled in after the site walk.</p>'}
       ${isDD ? '' : ddSection}
       <div class="modal-foot full"><button type="button" class="btn" data-close>Cancel</button><button class="btn primary">${p ? 'Save changes' : isDD ? 'Add property' : 'Create project'}</button></div>
     </form>`, { wide: true });
@@ -2085,6 +2123,8 @@ async function renderProject(id) {
       <section><h2>Property</h2><dl class="kv">
           <dt>Property owner</dt><dd>${esc(p.property_owner || '—')}</dd>
           <dt>Owner contact</dt><dd>${esc(p.property_owner_contact || '—')}</dd>
+          <dt>Site type</dt><dd>${esc(label(p.site_type) || '—')}</dd>
+          <dt>Our owner</dt><dd>${esc(p.owner_name || '—')}</dd>
           <dt>Utility</dt><dd>${p.utility_id ? `<a href="#/utilities/${p.utility_id}">${esc(p.utility_company)}</a>` : esc(p.utility_company || '—')}</dd>
           ${p.phase === 'pipeline' ? `<dt>Electrician</dt><dd>${p.contractor_id && contractorById(p.contractor_id) ? `<a href="#/electricians/${p.contractor_id}">${esc(contractorById(p.contractor_id).company)}</a>` : `<a href="${msHref(p.id, siteWalkMs()?.id)}">Quotes ›</a>`}</dd>` : ''}
           <dt>Rebate</dt><dd>${p.rebates.map((r, i) => rebateLine(r, i === 0 && p.rebate_amount ? `expected ${money(p.rebate_amount)}` : '')).join('')}${p.rebate_program ? `<div class="small">${esc(p.rebate_program)}</div>` : ''}${!p.rebates.length && !p.rebate_program ? '—' : ''}</dd>
@@ -2101,16 +2141,8 @@ async function renderProject(id) {
           <dt>Address</dt><dd>${esc([p.address, p.city, p.state, p.zip].filter(Boolean).join(', ') || '—')}
             ${p.address || p.city ? `<div><a class="small" target="_blank" rel="noopener" href="https://www.google.com/maps/search/?api=1&query=${encodeURIComponent([p.address, p.city, p.state, p.zip].filter(Boolean).join(', '))}">Open map ↗</a></div>` : ''}</dd>
         </dl></section>
-      <section><h2>Site & scope</h2><dl class="kv">
-          <dt>Site type</dt><dd>${esc(label(p.site_type) || '—')}</dd>
-          <dt>Chargers</dt><dd>${p.charger_count ? `${p.charger_count} × ${esc(p.charger_type || 'ports')}` : '—'}</dd>
-          <dt>Power</dt><dd>${p.power_kw ? `${num(p.power_kw)} kW` : '—'}</dd>
-          <dt>Est. value</dt><dd>${money(p.estimated_value)}</dd>
-          <dt>Target live</dt><dd>${fdate(p.target_live_date)}</dd>
-          <dt>Owner</dt><dd>${esc(p.owner_name || '—')}</dd>
-          <dt>Created</dt><dd>${fdate(p.created_at)}</dd>
-        </dl></section>
-      ${p.diligence_notes || p.description ? `<div class="info-notes">${p.diligence_notes ? `<div><h3 class="side-h">Notes</h3><div style="white-space:pre-wrap">${esc(p.diligence_notes)}</div></div>` : ''}${p.description ? `<div><h3 class="side-h">Scope notes</h3><div style="white-space:pre-wrap">${esc(p.description)}</div></div>` : ''}</div>` : ''}
+      <section>${scopeView(p)}</section>
+      ${p.diligence_notes ? `<div class="info-notes">${p.diligence_notes ? `<div><h3 class="side-h">Notes</h3><div style="white-space:pre-wrap">${esc(p.diligence_notes)}</div></div>` : ''}</div>` : ''}
     </div>
     ${dd ? `<div class="card dd-card"><div class="card-head"><h2>Assessment</h2><span class="ms-pill ms-pill-${p.dd_stage === 'passed' ? 'not_needed' : p.dd_stage === 'review' ? 'in_progress' : 'not_started'}">${esc(DD_STAGE_LABEL[p.dd_stage] || p.dd_stage)}</span></div>
       ${p.dd_stage === 'new' && p.dd_review_note ? `<div class="dd-returned"><b>${esc(p.reviewed_by_name || 'Reviewer')} needs more info:</b> ${esc(p.dd_review_note)}</div>` : ''}
@@ -2134,6 +2166,7 @@ async function renderProject(id) {
   $('#ddReopen')?.addEventListener('click', async () => { try { await api('POST', `/api/projects/${p.id}/reopen`); toast('Back in To assess'); route(); } catch (err) { fail(err); } });
   $$('[data-pr]', view).forEach((b) => (b.onclick = () => reviewModal(p, b.dataset.pr, (r) => { if (b.dataset.pr === 'approve' && r) location.hash = msHref(p.id, r.milestones.find((x) => x.status === 'in_progress')?.id || r.milestones[0].id); else route(); })));
   bindRebateChips();
+  $$('[data-scope]', view).forEach((b) => (b.onclick = () => scopeModal(p, route)));
   projectRemindersCard(p, $('#remCard')).catch(() => {});
   projectCalendarCard(p, $('#calCard')).catch(() => {});
   $('#quickStatus').onchange = async (e) => {
