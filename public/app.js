@@ -54,7 +54,7 @@ const MS_LABEL = { not_started: 'Not started', in_progress: 'In progress', done:
 const MS_ICON = { not_started: '○', in_progress: '●', done: '✓', not_needed: '–' };
 const OPEN_STATUSES = ['active', 'on_hold', 'blocked'];
 const msWhen = (x) => (x.status === 'done' && x.completed_at ? `done ${fdate(x.completed_at)}`
-  : x.status === 'in_progress' ? `${x.days_open ?? 0}d in progress${x.overdue ? ` · over ${x.sla_days}d target` : ''}` : '');
+  : x.status === 'in_progress' ? `${x.days_open ?? 0}d in progress` : '');
 // small row of chips: one per milestone, showing its status
 const msTrack = (p, { text = true } = {}) => {
   if (p.phase === 'diligence') return phaseBadge();
@@ -708,7 +708,7 @@ const msHref = (pid, mid) => `#/projects/${pid}/m/${mid}`;
 const msBookKind = (m) => (/site walk/i.test(m.name) ? 'site_walk' : /install/i.test(m.name) ? 'installation' : 'inspection');
 const msStatusPill = (s, overdue) => `<span class="ms-pill ms-pill-${s}${overdue ? ' late' : ''}">${overdue ? 'Running late' : MS_LABEL[s]}</span>`;
 const msMeta = (x) => (x.status === 'done' && x.completed_at ? `Done ${fdate(x.completed_at)}`
-  : x.status === 'in_progress' ? `${x.days_open ?? 0} days in progress${x.overdue ? ` (target ${x.sla_days})` : ''}`
+  : x.status === 'in_progress' ? `${x.days_open ?? 0} days in progress`
   : x.status === 'not_needed' ? 'Not needed for this site' : 'Not started');
 
 // ---------- milestones + the steps each project manager writes ----------
@@ -720,7 +720,14 @@ const msCurrent = (p) => {
   const xs = S.meta.milestones.map((m, i) => ({ m, x: p.milestones?.[i] || { status: 'not_started' } }));
   return xs.find((o) => o.x.status === 'in_progress') || xs.find((o) => o.x.status === 'not_started') || null;
 };
-const stageSince = (o) => (o.x.status === 'in_progress' ? `${o.x.days_open ?? 0} day${o.x.days_open === 1 ? '' : 's'} in ${o.m.name}` : 'Not started yet');
+const daysSince = (ts) => (ts ? Math.max(0, Math.floor((Date.now() - toDate(ts).getTime()) / 864e5)) : null);
+const phaseDays = (p, o) => {
+  if (o.x.status === 'in_progress' && o.x.started_at) return daysSince(o.x.started_at);
+  const lastDone = (p.milestones || []).map((x) => x.completed_at).filter(Boolean).sort().pop();
+  return lastDone ? daysSince(lastDone) : (p.days_in_phase ?? 0);
+};
+const plural = (n, w) => `${n} ${w}${n === 1 ? '' : 's'}`;
+const stageSince = (p, o) => `${plural(phaseDays(p, o), 'day')} in ${o.m.name}`;
 // pipeline dropdown: which milestone, how long, and the project manager's next step
 const stagePanel = (p) => {
   const cur = msCurrent(p); const N = p.next_step;
@@ -728,7 +735,7 @@ const stagePanel = (p) => {
   return `<div class="stage-panel">
     <div class="stage-col"><div class="nx-h">Milestone</div>
       <div class="stage-name"><span class="dot" style="background:${esc(cur.m.color)}"></span>${esc(cur.m.name)}</div>
-      <div class="small ${cur.x.overdue ? 'stale' : 'muted'}">${esc(stageSince(cur))}${cur.x.overdue ? ` (target ${cur.x.sla_days})` : ''}</div></div>
+      <div class="small stage-days">${esc(stageSince(p, cur))}</div></div>
     <div class="stage-col stage-next"><div class="nx-h">Next step</div>
       ${N ? `<div class="stage-step">${esc(N.label)}</div>
         <div class="small muted">${[N.milestone_id !== cur.m.id ? esc(msName(N.milestone_id)) : '', N.created_by_name ? `added by ${esc(N.created_by_name)}` : '', dueText(N)].filter(Boolean).join(' · ')}</div>`
@@ -736,16 +743,17 @@ const stagePanel = (p) => {
   </div>`;
 };
 // the four milestones across the top of a site: green check when done
-const msStepper = (p, selId, { link = false } = {}) => `<div class="mstep" role="tablist">${S.meta.milestones.map((m, i) => {
+const msStepper = (p, selId, { link = false } = {}) => { const cur = msCurrent(p); return `<div class="mstep" role="tablist">${S.meta.milestones.map((m, i) => {
   const x = p.milestones[i];
+  const isCur = cur && cur.m.id === m.id;
   const icon = x.status === 'done' ? '✓' : x.status === 'not_needed' ? '–' : String(i + 1);
-  const sub = x.status === 'done' ? `Done ${fdate(x.completed_at)}` : x.status === 'in_progress' ? `${x.days_open ?? 0} day${x.days_open === 1 ? '' : 's'}` : x.status === 'not_needed' ? 'Not needed' : 'Not started';
+  const sub = isCur ? plural(phaseDays(p, cur), 'day') : x.status === 'not_needed' ? 'Not needed' : '';
   const attrs = link ? `href="${msHref(p.id, m.id)}"` : `type="button" data-mspick="${m.id}"`;
   const tag = link ? 'a' : 'button';
-  return `<${tag} ${attrs} role="tab" aria-selected="${String(m.id) === String(selId)}" class="mstep-item s-${x.status}${x.overdue ? ' late' : ''}${String(m.id) === String(selId) ? ' sel' : ''}" style="--mc:${esc(m.color)}">
+  return `<${tag} ${attrs} role="tab" aria-selected="${String(m.id) === String(selId)}" class="mstep-item s-${x.status}${isCur ? ' cur' : ''}${String(m.id) === String(selId) ? ' sel' : ''}" style="--mc:${esc(m.color)}">
     <span class="mstep-icon">${icon}</span>
-    <span class="mstep-text"><b>${esc(m.name)}</b><span class="mstep-sub">${esc(sub)}</span></span></${tag}>`;
-}).join('')}</div>`;
+    <span class="mstep-text"><b>${esc(m.name)}</b>${sub ? `<span class="mstep-sub">${esc(sub)}</span>` : ''}</span></${tag}>`;
+}).join('')}</div>`; };
 // one milestone opened on the site page: where it's up to, its steps, and its conversation
 const msPanel = (p, mid) => {
   const i = S.meta.milestones.findIndex((m) => String(m.id) === String(mid)); const m = S.meta.milestones[i]; const x = p.milestones[i];
@@ -826,7 +834,7 @@ async function renderMilestone(pid, mid) {
     <div class="muted small crumbs"><a href="#/projects">Projects</a> / <a href="#/projects/${p.id}">${esc(p.code)} ${esc(p.name)}</a> / ${esc(m.name)}</div>
     <div class="page-head ms-head">
       <div><h1><span class="ms-dot" style="background:${esc(m.color)}"></span>${esc(m.name)}</h1>
-        <div class="muted small" style="margin-top:4px">${esc(p.address || p.name)}${p.city ? `, ${esc(p.city)}` : ''} · <span class="${x.overdue ? 'stale' : ''}">${esc(msMeta(x))}</span> · target ${m.sla_days} days</div></div>
+        <div class="muted small" style="margin-top:4px">${esc(p.address || p.name)}${p.city ? `, ${esc(p.city)}` : ''} · <span class="${x.overdue ? 'stale' : ''}">${esc(msMeta(x))}</span></div></div>
       <div class="actions">
         ${p.phase === 'pipeline' ? `<label class="status-select">Status<select id="msStatus">${options(MS_STATUSES.map((s) => [s, MS_LABEL[s]]), x.status)}</select></label>`
           : '<span class="muted small">Move this property to the pipeline to start tracking it.</span>'}
@@ -1836,8 +1844,8 @@ async function renderPipeline() {
       <div class="actions">${territoryToggle(mine)}<a class="btn" href="#/diligence">Due diligence →</a></div></div>
     <form class="filters" id="pFilters">
       <select name="milestone_id">${options(msOpts, q.get('milestone_id'), { blank: 'Any milestone' })}</select>
-      <select name="ms_status" class="${q.get('milestone_id') ? '' : 'hidden'}">${options([['todo', 'Still to do'], ...MS_STATUSES.map((s) => [s, MS_LABEL[s]]), ['overdue', 'Running late']], q.get('ms_status'), { blank: 'Any status' })}</select>
-      <select name="progress">${options([['incomplete', 'Still in progress'], ['complete', 'Live (all done)'], ['overdue', 'Running late']], q.get('progress'), { blank: 'All projects' })}</select>
+      <select name="ms_status" class="${q.get('milestone_id') ? '' : 'hidden'}">${options([['todo', 'Still to do'], ...MS_STATUSES.map((s) => [s, MS_LABEL[s]])], q.get('ms_status'), { blank: 'Any status' })}</select>
+      <select name="progress">${options([['incomplete', 'Still in progress'], ['complete', 'Live (all done)']], q.get('progress'), { blank: 'All projects' })}</select>
       <button type="button" class="btn sm ghost" id="moreF">${moreOn ? 'Fewer filters' : 'More filters'}</button>
       <span id="moreFBox" class="more-f ${moreOn ? '' : 'hidden'}">
         <select name="status">${options([['open', 'Open (active/hold/blocked)'], ['active', 'Active'], ['on_hold', 'On hold'], ['blocked', 'Blocked'], ['won', 'Won'], ['', 'All statuses']], params.get('status'))}</select>
@@ -1848,7 +1856,7 @@ async function renderPipeline() {
       <button class="chip ${stateSel ? '' : 'active'}" data-state="">All states <span>${all.length}</span></button>
       ${keys.map((k) => `<button class="chip ${stateSel === k ? 'active' : ''}" data-state="${esc(k)}" title="${esc(stateName(k))}">${k === 'none' ? 'No state' : esc(k)} <span>${groups[k].length}</span></button>`).join('')}
     </div>
-    <div class="track-legend small muted"><span><i class="tseg t-done"></i>Done</span><span><i class="tseg t-in_progress"></i>In progress</span><span><i class="tseg t-not_started"></i>Not started</span><span><i class="tseg t-in_progress late"></i>Late</span><span class="tl-tip">Click a site to see where it's up to · double-click to open it</span></div>
+    <div class="track-legend small muted"><span><i class="tseg t-done"></i>Done</span><span><i class="tseg t-in_progress"></i>In progress</span><span><i class="tseg t-not_started"></i>Not started</span><span class="tl-tip">Click a site to see where it's up to · double-click to open it</span></div>
     ${shown.map(lane).join('') || `<div class="card empty">${stateSel ? 'No projects in this state.' : 'No projects match. Finish due diligence on a property to move it here.'}</div>`}`;
 
   const form = $('#pFilters');
@@ -1899,7 +1907,7 @@ async function renderProjects() {
     <form class="filters" id="filters">
       <input type="search" name="q" placeholder="Search name, code, customer, city…" value="${esc(f.q)}">
       <select name="phase">${options([['diligence', 'Due diligence'], ['pipeline', 'Pipeline']], f.phase, { blank: 'Diligence + pipeline' })}</select>
-      <select name="progress">${options([['incomplete', 'Still in progress'], ['complete', 'Live (all done)'], ['overdue', 'Running late']], f.progress, { blank: 'Any progress' })}</select>
+      <select name="progress">${options([['incomplete', 'Still in progress'], ['complete', 'Live (all done)']], f.progress, { blank: 'Any progress' })}</select>
       <select name="state">${options([...(myStates().length ? [['mine', `★ My territory (${myStates().join(', ')})`]] : []), ...US_STATES.map(([c, n]) => [c, `${c} · ${n}`])], f.state, { blank: 'All states' })}</select>
       <select name="status">${options([['open', 'Open'], ...S.meta.enums.projectStatus.map((s) => [s, label(s)])], f.status, { blank: 'All statuses' })}</select>
       <select name="owner_id">${options(S.meta.users.map((u) => [u.id, u.name]), f.owner_id, { blank: 'All owners' })}</select>

@@ -800,3 +800,7 @@ h2 { font-size: 15px; }
 /* days in the milestone: amber while in progress, red once it's past its target */
 .mstep-item.s-in_progress .mstep-sub { color: #b45309; font-weight: 600; }
 .mstep-item.s-in_progress.late .mstep-sub { color: #dc2626; }
+
+/* only the milestone a site is on shows its days */
+.mstep-item .mstep-sub { color: var(--muted); font-weight: 400; }
+.mstep-item.cur .mstep-sub, .mstep-item.s-in_progress.late .mstep-sub, .stage-days { color: #b45309; font-weight: 600; }

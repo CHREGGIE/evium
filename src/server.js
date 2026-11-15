@@ -226,7 +226,7 @@ function attachMilestones(list, { withSteps = false } = {}) {
       const r = mine[m.id];
       const status = r?.status || 'not_started';
       const days = status === 'in_progress' && r.started_at ? Math.max(0, Math.floor((t - parseTs(r.started_at)) / 864e5)) : null;
-      return { id: m.id, status, started_at: r?.started_at || null, completed_at: r?.completed_at || null, days_open: days, sla_days: m.sla_days, overdue: days != null && days > m.sla_days, msg_count: counts[m.id] || 0,
+      return { id: m.id, status, started_at: r?.started_at || null, completed_at: r?.completed_at || null, days_open: days, sla_days: m.sla_days, overdue: false, // target days are switched off for now (sla_days is kept for later) msg_count: counts[m.id] || 0,
         docs_missing: status === 'done' || status === 'not_needed' ? [] : requiredDocs(m).filter((c) => !haveDocs.has(c)),
         // steps not copied to this project yet: count the defaults (all ticked if the milestone is already done)
         steps_total: steps[p.id]?.[m.id]?.total ?? (tmpl[m.id] || 0),
