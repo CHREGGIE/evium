@@ -767,6 +767,21 @@ document.addEventListener('click', (e) => {
   $$('.done-wrap').forEach((w) => w.classList.toggle('open', showDoneSteps));
   $$('[data-donetoggle]').forEach((x) => x.setAttribute('aria-expanded', String(showDoneSteps)));
 });
+// edit / remove a step (for typos or a step added by mistake)
+const stepTools = (st) => `<span class="ps-tools">
+  <button type="button" class="ps-btn" data-editstep="${st.id}" data-label="${esc(st.label)}" title="Edit this step">Edit</button>
+  <button type="button" class="ps-btn ps-rm" data-rmstep="${st.id}" data-label="${esc(st.label)}" title="Remove this step" aria-label="Remove this step">×</button></span>`;
+function bindStepEdits(root, again) {
+  $$('[data-editstep]', root).forEach((b) => (b.onclick = async () => {
+    const v = prompt('Edit the step:', b.dataset.label);
+    if (v === null || !v.trim() || v.trim() === b.dataset.label) return;
+    try { await api('PATCH', `/api/steps/${b.dataset.editstep}`, { label: v.trim() }); toast('Step updated'); again(); } catch (err) { fail(err); }
+  }));
+  $$('[data-rmstep]', root).forEach((b) => (b.onclick = async () => {
+    if (!confirm(`Remove this step?\n\n"${b.dataset.label}"`)) return;
+    try { await api('DELETE', `/api/steps/${b.dataset.rmstep}`); toast('Step removed'); again(); } catch (err) { fail(err); }
+  }));
+}
 // one milestone opened on the site page: where it's up to, its steps, and its conversation
 const msPanel = (p, mid) => {
   const i = S.meta.milestones.findIndex((m) => String(m.id) === String(mid)); const m = S.meta.milestones[i]; const x = p.milestones[i];
@@ -779,11 +794,11 @@ const msPanel = (p, mid) => {
       <div class="muted small" style="margin:-6px 0 10px">${esc(msMeta(x))}${steps.length ? ` · ${x.steps_done} of ${x.steps_total} steps done` : ''}</div>
       ${x.status === 'not_needed' ? '<div class="muted small">Not needed for this site.</div>' : `
       ${doneSteps(steps.filter((st) => st.done_at), (rows) => `<ul class="psteps">${rows}</ul>`, (st) => `<li class="is-done">
-          <label><input type="checkbox" data-bstep="${st.id}" checked><span>${esc(st.label)}</span></label><span></span>
+          <label><input type="checkbox" data-bstep="${st.id}" checked><span>${esc(st.label)}</span></label><span></span>${stepTools(st)}
           <span class="ss-meta">${esc(st.done_by_name || '')}${st.done_by_name ? ' · ' : ''}${esc(fdate(st.done_at))}</span></li>`)}
       <ul class="psteps">${steps.filter((st) => !st.done_at).map((st) => `<li class="${nextHere?.id === st.id ? 'is-next' : ''}">
           <label><input type="checkbox" data-bstep="${st.id}"><span>${esc(st.label)}</span></label>
-          ${nextHere?.id === st.id ? '<span class="ss-next">Next</span>' : '<span></span>'}
+          ${nextHere?.id === st.id ? '<span class="ss-next">Next</span>' : '<span></span>'}${stepTools(st)}
           <span class="ss-meta">${[dueText(st), st.created_by_name ? `added by ${esc(st.created_by_name)}` : ''].filter(Boolean).join(' · ')}</span>
         </li>`).join('') || `<li class="ss-empty muted small">${steps.length ? 'Every step is checked off. Write the next one below.' : 'No steps yet. Write the first one below.'}</li>`}</ul>
       <form class="add-step" data-badd="${m.id}"><input name="label" placeholder="Add the next step…" autocomplete="off" aria-label="Add a step to ${esc(m.name)}"><button class="btn sm">Add</button></form>
@@ -795,6 +810,7 @@ const msPanel = (p, mid) => {
 };
 // wires up ticking, adding and finishing steps in `root`
 function bindSteps(root, p, again) {
+  bindStepEdits(root, again);
   $$('[data-bstep]', root).forEach((cb) => (cb.onchange = async () => {
     try { await api('PATCH', `/api/steps/${cb.dataset.bstep}`, { done: cb.checked }); again(); } catch (err) { fail(err); again(); }
   }));
@@ -868,7 +884,7 @@ async function renderMilestone(pid, mid) {
           ${doneSteps(steps.filter((s) => s.done_at), (rows) => `<ul class="steps">${rows}</ul>`, (s) => `<li class="is-done">
               <label class="step-check"><input type="checkbox" data-step="${s.id}" checked><span>${esc(s.label)}</span></label>
               <span class="step-meta">${esc(s.done_by_name || '')}${s.done_by_name ? ' · ' : ''}${fdate(s.done_at)}</span>
-              <span class="step-tools"><button type="button" class="step-del" data-delstep="${s.id}" title="Remove step" aria-label="Remove step">×</button></span></li>`)}
+              <span class="step-tools"><button type="button" class="step-mv" data-editstep="${s.id}" data-label="${esc(s.label)}" title="Edit this step">Edit</button><button type="button" class="step-del" data-delstep="${s.id}" title="Remove step" aria-label="Remove step">×</button></span></li>`)}
           <ul class="steps">${steps.filter((s) => !s.done_at).map((s) => `<li>
               <label class="step-check"><input type="checkbox" data-step="${s.id}" ${s.done_at ? 'checked' : ''}><span>${esc(s.label)}</span></label>
               <span class="step-meta">${s.done_at ? `${esc(s.done_by_name || '')}${s.done_by_name ? ' · ' : ''}${fdate(s.done_at)}`
@@ -876,6 +892,7 @@ async function renderMilestone(pid, mid) {
               <span class="step-tools">
                 <button type="button" class="step-mv" data-mv="up" data-mvid="${s.id}" title="Move up" aria-label="Move up">↑</button>
                 <button type="button" class="step-mv" data-mv="down" data-mvid="${s.id}" title="Move down" aria-label="Move down">↓</button>
+                <button type="button" class="step-mv" data-editstep="${s.id}" data-label="${esc(s.label)}" title="Edit this step">Edit</button>
                 <button type="button" class="step-mv" data-due="${s.id}" data-dueval="${esc(s.due_on || '')}" title="Set a due date" aria-label="Set a due date">Due</button>
                 <button type="button" class="step-del" data-delstep="${s.id}" title="Remove step" aria-label="Remove step">×</button></span></li>`).join('')
             || `<li class="muted small">${steps.length ? 'Every step is checked off. Add the next one below.' : 'No steps yet. Add the first one below.'}</li>`}</ul>
@@ -925,6 +942,7 @@ async function renderMilestone(pid, mid) {
     const due_on = $('#addStep input[name=due_on]').value || null;
     try { await api('POST', `/api/projects/${p.id}/milestones/${m.id}/steps`, { label, due_on }); again(); } catch (err) { fail(err); }
   });
+  bindStepEdits(view, again);
   $$('[data-mv]', view).forEach((b) => (b.onclick = async () => {
     try { await api('PATCH', `/api/steps/${b.dataset.mvid}`, { move: b.dataset.mv }); again(); } catch (err) { fail(err); }
   }));
