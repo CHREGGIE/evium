@@ -795,3 +795,5 @@ h2 { font-size: 15px; }
   .stage-panel { grid-template-columns: minmax(0, 1fr); }
   .stage-next { border-left: 0; border-top: 1px solid var(--line); border-radius: 0 0 10px 10px; }
 }
+/* milestone numbers stay grey until the milestone is done (then a green check) */
+.mstep-item.s-in_progress .mstep-icon, .mstep-item.s-in_progress.late .mstep-icon { background: #eef2f6; color: #64748b; }
