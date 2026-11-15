@@ -2081,6 +2081,37 @@ async function renderProject(id) {
         ${S.me.role === 'admin' ? '<button class="btn danger" id="delProject">Delete</button>' : ''}
       </div>
     </div>
+    <div class="card info-strip">
+      <section><h2>Property</h2><dl class="kv">
+          <dt>Property owner</dt><dd>${esc(p.property_owner || '—')}</dd>
+          <dt>Owner contact</dt><dd>${esc(p.property_owner_contact || '—')}</dd>
+          <dt>Utility</dt><dd>${p.utility_id ? `<a href="#/utilities/${p.utility_id}">${esc(p.utility_company)}</a>` : esc(p.utility_company || '—')}</dd>
+          ${p.phase === 'pipeline' ? `<dt>Electrician</dt><dd>${p.contractor_id && contractorById(p.contractor_id) ? `<a href="#/electricians/${p.contractor_id}">${esc(contractorById(p.contractor_id).company)}</a>` : `<a href="${msHref(p.id, siteWalkMs()?.id)}">Quotes ›</a>`}</dd>` : ''}
+          <dt>Rebate</dt><dd>${p.rebates.map((r, i) => rebateLine(r, i === 0 && p.rebate_amount ? `expected ${money(p.rebate_amount)}` : '')).join('')}${p.rebate_program ? `<div class="small">${esc(p.rebate_program)}</div>` : ''}${!p.rebates.length && !p.rebate_program ? '—' : ''}</dd>
+          <dt>Tax credit</dt><dd>${p.tax_credit_id ? rebateLine(S.meta.rebates.find((r) => r.id === p.tax_credit_id) || { id: p.tax_credit_id, name: 'Tax credit' },
+            `${{ yes: 'eligible', no: 'not eligible', unknown: 'eligibility not checked' }[p.tax_credit_eligible || 'unknown']}${p.tax_credit_amount ? `, est. ${money(p.tax_credit_amount)}` : ''}`) : '—'}</dd>
+          ${p.dd_rating ? `<dt>Rating</dt><dd>${ratingView(p.dd_rating)}</dd>` : ''}
+          ${p.diligence_completed_at ? `<dt>Approved</dt><dd>${fdate(p.diligence_completed_at)}${p.reviewed_by_name ? ` by ${esc(p.reviewed_by_name)}` : ''}</dd>` : ''}
+        </dl></section>
+      <section><h2>Customer</h2><dl class="kv">
+          <dt>Company</dt><dd>${esc(p.customer_name || '—')}</dd>
+          <dt>Contact</dt><dd>${esc(p.contact_name || '—')}</dd>
+          <dt>Email</dt><dd>${p.contact_email ? `<a href="mailto:${esc(p.contact_email)}">${esc(p.contact_email)}</a>` : '—'}</dd>
+          <dt>Phone</dt><dd>${p.contact_phone ? `<a href="tel:${esc(p.contact_phone)}">${esc(p.contact_phone)}</a>` : '—'}</dd>
+          <dt>Address</dt><dd>${esc([p.address, p.city, p.state, p.zip].filter(Boolean).join(', ') || '—')}
+            ${p.address || p.city ? `<div><a class="small" target="_blank" rel="noopener" href="https://www.google.com/maps/search/?api=1&query=${encodeURIComponent([p.address, p.city, p.state, p.zip].filter(Boolean).join(', '))}">Open map ↗</a></div>` : ''}</dd>
+        </dl></section>
+      <section><h2>Site & scope</h2><dl class="kv">
+          <dt>Site type</dt><dd>${esc(label(p.site_type) || '—')}</dd>
+          <dt>Chargers</dt><dd>${p.charger_count ? `${p.charger_count} × ${esc(p.charger_type || 'ports')}` : '—'}</dd>
+          <dt>Power</dt><dd>${p.power_kw ? `${num(p.power_kw)} kW` : '—'}</dd>
+          <dt>Est. value</dt><dd>${money(p.estimated_value)}</dd>
+          <dt>Target live</dt><dd>${fdate(p.target_live_date)}</dd>
+          <dt>Owner</dt><dd>${esc(p.owner_name || '—')}</dd>
+          <dt>Created</dt><dd>${fdate(p.created_at)}</dd>
+        </dl></section>
+      ${p.diligence_notes || p.description ? `<div class="info-notes">${p.diligence_notes ? `<div><h3 class="side-h">Notes</h3><div style="white-space:pre-wrap">${esc(p.diligence_notes)}</div></div>` : ''}${p.description ? `<div><h3 class="side-h">Scope notes</h3><div style="white-space:pre-wrap">${esc(p.description)}</div></div>` : ''}</div>` : ''}
+    </div>
     ${dd ? `<div class="card dd-card"><div class="card-head"><h2>Assessment</h2><span class="ms-pill ms-pill-${p.dd_stage === 'passed' ? 'not_needed' : p.dd_stage === 'review' ? 'in_progress' : 'not_started'}">${esc(DD_STAGE_LABEL[p.dd_stage] || p.dd_stage)}</span></div>
       ${p.dd_stage === 'new' && p.dd_review_note ? `<div class="dd-returned"><b>${esc(p.reviewed_by_name || 'Reviewer')} needs more info:</b> ${esc(p.dd_review_note)}</div>` : ''}
       <div style="margin-bottom:6px">${ratingView(p.dd_rating)}</div>
@@ -2093,37 +2124,8 @@ async function renderProject(id) {
         <div id="tabBody"></div>
       </div>
       <div class="grid" style="gap:16px">
-        <div class="card"><h2>Property</h2><dl class="kv">
-          <dt>Property owner</dt><dd>${esc(p.property_owner || '—')}</dd>
-          <dt>Owner contact</dt><dd>${esc(p.property_owner_contact || '—')}</dd>
-          <dt>Utility</dt><dd>${p.utility_id ? `<a href="#/utilities/${p.utility_id}">${esc(p.utility_company)}</a>` : esc(p.utility_company || '—')}</dd>
-          ${p.phase === 'pipeline' ? `<dt>Electrician</dt><dd>${p.contractor_id && contractorById(p.contractor_id) ? `<a href="#/electricians/${p.contractor_id}">${esc(contractorById(p.contractor_id).company)}</a>` : `<a href="${msHref(p.id, siteWalkMs()?.id)}">Quotes ›</a>`}</dd>` : ''}
-          <dt>Rebate</dt><dd>${p.rebates.map((r, i) => rebateLine(r, i === 0 && p.rebate_amount ? `expected ${money(p.rebate_amount)}` : '')).join('')}${p.rebate_program ? `<div class="small">${esc(p.rebate_program)}</div>` : ''}${!p.rebates.length && !p.rebate_program ? '—' : ''}</dd>
-          <dt>Tax credit</dt><dd>${p.tax_credit_id ? rebateLine(S.meta.rebates.find((r) => r.id === p.tax_credit_id) || { id: p.tax_credit_id, name: 'Tax credit' },
-            `${{ yes: 'eligible', no: 'not eligible', unknown: 'eligibility not checked' }[p.tax_credit_eligible || 'unknown']}${p.tax_credit_amount ? `, est. ${money(p.tax_credit_amount)}` : ''}`) : '—'}</dd>
-          ${p.dd_rating ? `<dt>Rating</dt><dd>${ratingView(p.dd_rating)}</dd>` : ''}
-          ${p.diligence_completed_at ? `<dt>Approved</dt><dd>${fdate(p.diligence_completed_at)}${p.reviewed_by_name ? ` by ${esc(p.reviewed_by_name)}` : ''}</dd>` : ''}
-        </dl>
-        ${p.diligence_notes ? `<h3 class="side-h">Notes</h3><div style="white-space:pre-wrap">${esc(p.diligence_notes)}</div>` : ''}</div>
         <div class="card" id="calCard"></div>
         <div class="card" id="remCard"></div>
-        <div class="card"><h2>Customer</h2><dl class="kv">
-          <dt>Company</dt><dd>${esc(p.customer_name || '—')}</dd>
-          <dt>Contact</dt><dd>${esc(p.contact_name || '—')}</dd>
-          <dt>Email</dt><dd>${p.contact_email ? `<a href="mailto:${esc(p.contact_email)}">${esc(p.contact_email)}</a>` : '—'}</dd>
-          <dt>Phone</dt><dd>${p.contact_phone ? `<a href="tel:${esc(p.contact_phone)}">${esc(p.contact_phone)}</a>` : '—'}</dd>
-        </dl></div>
-        <div class="card"><h2>Site & scope</h2><dl class="kv">
-          <dt>Address</dt><dd>${esc([p.address, p.city, p.state, p.zip].filter(Boolean).join(', ') || '—')}
-            ${p.address || p.city ? `<div><a class="small" target="_blank" rel="noopener" href="https://www.google.com/maps/search/?api=1&query=${encodeURIComponent([p.address, p.city, p.state, p.zip].filter(Boolean).join(', '))}">Open map ↗</a></div>` : ''}</dd>
-          <dt>Site type</dt><dd>${esc(label(p.site_type) || '—')}</dd>
-          <dt>Chargers</dt><dd>${p.charger_count ? `${p.charger_count} × ${esc(p.charger_type || 'ports')}` : '—'}</dd>
-          <dt>Power</dt><dd>${p.power_kw ? `${num(p.power_kw)} kW` : '—'}</dd>
-          <dt>Est. value</dt><dd>${money(p.estimated_value)}</dd>
-          <dt>Target live</dt><dd>${fdate(p.target_live_date)}</dd>
-          <dt>Owner</dt><dd>${esc(p.owner_name || '—')}</dd>
-          <dt>Created</dt><dd>${fdate(p.created_at)}</dd>
-        </dl>${p.description ? `<h3 style="margin-top:14px">Scope notes</h3><div style="white-space:pre-wrap">${esc(p.description)}</div>` : ''}</div>
       </div>
     </div>`;
 
