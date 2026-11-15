@@ -61,8 +61,8 @@ const msTrack = (p, { text = true } = {}) => {
   const xs = S.meta.milestones.map((m, i) => ({ m, x: p.milestones?.[i] || { status: 'not_started' } }));
   const now = xs.filter((o) => o.x.status === 'in_progress');
   const next = xs.find((o) => o.x.status === 'not_started');
-  const late = now.some((o) => o.x.overdue);
-  const what = p.ms_complete ? 'Live' : now.length ? `Now: ${now.map((o) => o.m.name).join(', ')}` : next ? `Next: ${next.m.name}` : '';
+  const late = now.some((o) => o.x.overdue) || !!p.next_step?.overdue;
+  const what = p.ms_complete ? 'Live' : p.next_step ? `Next: ${p.next_step.label}` : now.length ? `${now.map((o) => o.m.name).join(', ')}: no open steps` : next ? `Next: ${next.m.name}` : '';
   return `<span class="track"><span class="track-bar">${xs.map(({ m, x }) => `<i class="tseg t-${x.status}${x.overdue ? ' late' : ''}" title="${esc(m.name)}: ${MS_LABEL[x.status]}${msWhen(x) ? ` (${esc(msWhen(x))})` : ''}"></i>`).join('')}</span>${text
     ? `<span class="track-text${late ? ' stale' : ''}">${esc(what)} <span class="muted">${p.ms_done}/${p.ms_total}</span></span>` : ''}</span>`;
 };
@@ -330,8 +330,8 @@ async function projectRemindersCard(p, el) {
 // A milestone can need a document (e.g. a signed contract) before it can be marked done.
 function docUploadModal(projectId, milestoneId, missing, retry, { onCancel } = {}) {
   const m = msById(milestoneId);
-  const card = openModal(`${modalHead(`${esc(m?.name || 'Milestone')} needs a document`)}
-    <p>Before <b>${esc(m?.name || 'this milestone')}</b> can be marked done, upload ${missing.map((c) => `a <b>${esc(label(c))}</b>`).join(' and ')} document.</p>
+  const card = openModal(`${modalHead(`${esc(m?.name || 'Category')} needs a document`)}
+    <p>Before <b>${esc(m?.name || 'this category')}</b> can be marked done, upload ${missing.map((c) => `a <b>${esc(label(c))}</b>`).join(' and ')} document.</p>
     <form class="grid">
       <label>Document type<select name="category">${options(S.meta.enums.docCategory, missing[0])}</select></label>
       <label>File(s)<input type="file" name="files" multiple required></label>
@@ -548,7 +548,7 @@ async function renderUtility(id) {
     <div class="cols-main">
       <div class="grid" style="gap:16px">
         <div class="card"><h2>Sites with ${esc(u.name)} <span class="muted small">${u.sites.length} · ${live.length} live</span></h2>
-          ${u.sites.length ? `<div class="table-wrap" style="box-shadow:none"><table><thead><tr><th>Site</th><th>Milestones</th><th>Progress</th></tr></thead><tbody>
+          ${u.sites.length ? `<div class="table-wrap" style="box-shadow:none"><table><thead><tr><th>Site</th><th>Categories</th><th>Progress</th></tr></thead><tbody>
           ${u.sites.map((p) => `<tr class="clickable" data-href="#/projects/${p.id}"><td><b>${esc(p.address || p.name)}</b><div class="muted small">${esc(p.code)} · ${esc(p.name)}</div></td>
             <td>${p.phase === 'diligence' ? '' : msTrack(p)}</td><td>${progressBadge(p)}</td></tr>`).join('')}</tbody></table></div>` : '<div class="empty">No sites use this utility yet.</div>'}</div>
         <div class="card"><h2>Rebates for ${esc(u.name)} customers</h2>
@@ -711,6 +711,69 @@ const msMeta = (x) => (x.status === 'done' && x.completed_at ? `Done ${fdate(x.c
   : x.status === 'in_progress' ? `${x.days_open ?? 0} days in progress${x.overdue ? ` (target ${x.sla_days})` : ''}`
   : x.status === 'not_needed' ? 'Not needed for this site' : 'Not started');
 
+// ---------- steps: the project manager writes them inside each category ----------
+const msName = (id) => msById(id)?.name || '';
+const catTag = (id) => `<span class="cat-tag"><span class="dot" style="background:${esc(msById(id)?.color || '#94a3b8')}"></span>${esc(msName(id))}</span>`;
+const todayISO = () => new Date(Date.now() - new Date().getTimezoneOffset() * 6e4).toISOString().slice(0, 10);
+const dueText = (st) => (st.due_on ? `<span class="${!st.done_at && st.due_on < todayISO() ? 'stale' : ''}">due ${esc(fdate(`${st.due_on}T12:00`))}</span>` : '');
+// pipeline dropdown: when the last step was done, and what's next
+const nextPanel = (p) => {
+  const L = p.last_step; const N = p.next_step;
+  return `<div class="nx">
+    <div class="nx-col">
+      <div class="nx-h">Last completed</div>
+      ${L ? `<div class="nx-label">${esc(L.label)}</div>
+        <div class="nx-meta">${catTag(L.milestone_id)}<span>${esc(L.done_by_name || 'Someone')}</span><span>${esc(fdate(L.done_at))} (${esc(ago(L.done_at))})</span></div>`
+        : '<div class="muted small">Nothing ticked off yet.</div>'}
+    </div>
+    <div class="nx-col nx-next">
+      <div class="nx-h">Next step</div>
+      ${N ? `<label class="nx-check"><input type="checkbox" data-tick="${N.id}" title="Mark this step done"><span class="nx-label">${esc(N.label)}</span></label>
+        <div class="nx-meta">${catTag(N.milestone_id)}${N.created_by_name ? `<span>added by ${esc(N.created_by_name)}</span>` : ''}${N.due_on ? `<span>${dueText(N)}</span>` : ''}</div>`
+        : p.ms_complete ? '<div class="small">Everything is done. This site is live.</div>'
+        : `<div class="muted small">No open steps. <a href="#/projects/${p.id}">Add the next step ›</a></div>`}
+      ${p.upcoming_steps?.length ? `<div class="nx-after"><div class="nx-h">After that</div>${p.upcoming_steps.map((st) => `<div class="nx-up">${esc(st.label)} <span class="muted">· ${esc(msName(st.milestone_id))}</span>${st.due_on ? ` <span class="small">${dueText(st)}</span>` : ''}</div>`).join('')}</div>` : ''}
+    </div>
+  </div>`;
+};
+// site page: every category side by side, with its steps; anyone can tick, add or reorder
+const stepBoard = (p) => `<div class="sboard">${S.meta.milestones.map((m, i) => {
+  const x = p.milestones[i]; const steps = x.steps || [];
+  const na = x.status === 'not_needed';
+  const allTicked = steps.length && steps.every((st) => st.done_at);
+  return `<section class="scol ${na ? 'is-na' : ''} ${x.status === 'done' ? 'is-done' : ''}">
+    <div class="scol-head"><span class="scol-bar" style="background:${esc(m.color)}"></span><a class="scol-name" href="${msHref(p.id, m.id)}">${esc(m.name)}</a>${msStatusPill(x.status, x.overdue)}</div>
+    <div class="scol-meta muted small">${esc(msMeta(x))}${steps.length && !na ? ` · ${x.steps_done} of ${x.steps_total}` : ''}</div>
+    ${na ? '' : `<ul class="ssteps">${steps.map((st) => `<li class="${st.done_at ? 'is-done' : ''} ${p.next_step?.id === st.id ? 'is-next' : ''}">
+        <label><input type="checkbox" data-bstep="${st.id}" ${st.done_at ? 'checked' : ''}><span>${esc(st.label)}</span></label>
+        ${p.next_step?.id === st.id ? '<span class="ss-next">Next</span>' : ''}
+        ${st.done_at ? `<span class="ss-meta">${esc(st.done_by_name || '')}${st.done_by_name ? ' · ' : ''}${esc(fdate(st.done_at))}</span>` : st.due_on ? `<span class="ss-meta">${dueText(st)}</span>` : ''}
+      </li>`).join('') || '<li class="ss-empty muted small">No steps yet.</li>'}</ul>
+      ${allTicked && x.status !== 'done' ? `<button type="button" class="btn sm primary ss-done" data-bdone="${m.id}">Mark ${esc(m.name)} done</button>` : ''}
+      <form class="ss-add" data-badd="${m.id}"><input name="label" placeholder="+ Add a step" autocomplete="off" aria-label="Add a step to ${esc(m.name)}"></form>`}
+    <a class="scol-open small" href="${msHref(p.id, m.id)}">Files, chat${msBookKind(m) === 'site_walk' ? ', quotes' : ''}${x.doc_count ? ` (${x.doc_count} file${x.doc_count === 1 ? '' : 's'})` : ''} ›</a>
+  </section>`;
+}).join('')}</div>`;
+// wires up the board (and the pipeline's next-step tick boxes)
+function bindSteps(root, p, again) {
+  $$('[data-bstep], [data-tick]', root).forEach((cb) => (cb.onchange = async () => {
+    try { await api('PATCH', `/api/steps/${cb.dataset.bstep || cb.dataset.tick}`, { done: cb.checked }); if (cb.dataset.tick) toast('Step done'); again(); } catch (err) { fail(err); again(); }
+  }));
+  $$('[data-badd]', root).forEach((f) => (f.onsubmit = async (e) => {
+    e.preventDefault();
+    const label = $('input', f).value.trim(); if (!label) return;
+    try { await api('POST', `/api/projects/${p.id}/milestones/${f.dataset.badd}/steps`, { label }); again(); } catch (err) { fail(err); }
+  }));
+  $$('[data-bdone]', root).forEach((b) => (b.onclick = async () => {
+    const mid = b.dataset.bdone; const m = msById(mid);
+    const put = async () => { await api('PUT', `/api/projects/${p.id}/milestones/${mid}`, { status: 'done' }); toast(`${m.name} done`); again(); };
+    try { await put(); } catch (err) {
+      if (err.data?.missing_docs) docUploadModal(p.id, Number(mid), err.data.missing_docs, () => put().catch(fail), { onCancel: again });
+      else fail(err);
+    }
+  }));
+}
+
 // clean list of milestones; each row opens the milestone page
 const msList = (p) => `<div class="ms-list">${S.meta.milestones.map((m, i) => {
   const x = p.milestones[i];
@@ -755,7 +818,7 @@ async function renderMilestone(pid, mid) {
     </div>
     <div class="ms-nav">
       ${d.prev ? `<a class="btn sm" href="${msHref(p.id, d.prev.id)}">‹ ${esc(d.prev.name)}</a>` : '<span></span>'}
-      <a class="btn sm" href="#/projects/${p.id}">All milestones</a>
+      <a class="btn sm" href="#/projects/${p.id}">Back to the site</a>
       ${d.next ? `<a class="btn sm" href="${msHref(p.id, d.next.id)}">${esc(d.next.name)} ›</a>` : '<span></span>'}
     </div>
     <div class="cols-main">
@@ -768,10 +831,15 @@ async function renderMilestone(pid, mid) {
           ${allDone && x.status !== 'done' && p.phase === 'pipeline' ? `<div class="all-done">Every step is done. <button class="btn primary sm" id="markDone">Mark ${esc(m.name)} done</button></div>` : ''}
           <ul class="steps">${steps.map((s) => `<li class="${s.done_at ? 'is-done' : ''}">
               <label class="step-check"><input type="checkbox" data-step="${s.id}" ${s.done_at ? 'checked' : ''}><span>${esc(s.label)}</span></label>
-              <span class="step-meta">${s.done_at ? `${esc(s.done_by_name || '')}${s.done_by_name ? ' · ' : ''}${fdate(s.done_at)}` : ''}</span>
-              <button type="button" class="step-del" data-delstep="${s.id}" title="Remove step" aria-label="Remove step">×</button></li>`).join('')
+              <span class="step-meta">${s.done_at ? `${esc(s.done_by_name || '')}${s.done_by_name ? ' · ' : ''}${fdate(s.done_at)}`
+                : [dueText(s), s.created_by_name ? `added by ${esc(s.created_by_name)}` : ''].filter(Boolean).join(' · ')}</span>
+              <span class="step-tools">
+                <button type="button" class="step-mv" data-mv="up" data-mvid="${s.id}" title="Move up" aria-label="Move up">↑</button>
+                <button type="button" class="step-mv" data-mv="down" data-mvid="${s.id}" title="Move down" aria-label="Move down">↓</button>
+                <button type="button" class="step-mv" data-due="${s.id}" data-dueval="${esc(s.due_on || '')}" title="Set a due date" aria-label="Set a due date">Due</button>
+                <button type="button" class="step-del" data-delstep="${s.id}" title="Remove step" aria-label="Remove step">×</button></span></li>`).join('')
             || '<li class="muted small">No steps yet. Add the first one below.</li>'}</ul>
-          <form class="add-step" id="addStep"><input name="label" placeholder="Add a step for this site…" autocomplete="off"><button class="btn sm">Add</button></form>
+          <form class="add-step" id="addStep"><input name="label" placeholder="Add the next step for this site…" autocomplete="off"><input type="date" name="due_on" title="Due date (optional)" aria-label="Due date (optional)"><button class="btn sm">Add</button></form>
         </section>
         <section class="card">
           <div class="card-head"><h2>Documents</h2><span class="muted small">${d.documents.length} file${d.documents.length === 1 ? '' : 's'}</span></div>
@@ -813,9 +881,18 @@ async function renderMilestone(pid, mid) {
   }));
   $('#addStep').addEventListener('submit', async (e) => {
     e.preventDefault();
-    const label = $('#addStep input').value.trim(); if (!label) return;
-    try { await api('POST', `/api/projects/${p.id}/milestones/${m.id}/steps`, { label }); again(); } catch (err) { fail(err); }
+    const label = $('#addStep input[name=label]').value.trim(); if (!label) return;
+    const due_on = $('#addStep input[name=due_on]').value || null;
+    try { await api('POST', `/api/projects/${p.id}/milestones/${m.id}/steps`, { label, due_on }); again(); } catch (err) { fail(err); }
   });
+  $$('[data-mv]', view).forEach((b) => (b.onclick = async () => {
+    try { await api('PATCH', `/api/steps/${b.dataset.mvid}`, { move: b.dataset.mv }); again(); } catch (err) { fail(err); }
+  }));
+  $$('[data-due]', view).forEach((b) => (b.onclick = async () => {
+    const v = prompt('Due date (YYYY-MM-DD). Leave empty to clear.', b.dataset.dueval || todayISO());
+    if (v === null) return;
+    try { await api('PATCH', `/api/steps/${b.dataset.due}`, { due_on: v.trim() || null }); again(); } catch (err) { fail(err); }
+  }));
   $('#upBtn').onclick = async () => {
     const files = $('#upFiles').files;
     if (!files.length) { toast('Choose a file first', true); return; }
@@ -831,7 +908,7 @@ async function renderMilestone(pid, mid) {
   if ($('#quotesCard')) quotesSection(p, $('#quotesCard'), again).catch(() => {});
   api('GET', `/api/events?project_id=${p.id}&milestone_id=${m.id}&include_cancelled=1`).then((rows) => {
     const el = $('#msEvents'); if (!el) return;
-    el.innerHTML = evList(rows, { empty: 'Nothing booked for this milestone.', showSite: false }); bindEvents(el, again);
+    el.innerHTML = evList(rows, { empty: 'Nothing booked for this category.', showSite: false }); bindEvents(el, again);
   }).catch(() => {});
   bindReminderLines(view, again);
   mountChat($('#msChat'), p, m.id).catch(() => {});
@@ -1251,11 +1328,11 @@ function quoteModal(p, x, after) {
 const canSeeTeam = () => S.me.role === 'admin' || !!S.me.is_exec;
 // job titles, and the duties each one usually comes with (ticked automatically when picking a title in Admin)
 const TITLE_ORDER = ['CEO', 'Executive', 'Account manager', 'Senior project manager', 'Project manager', 'Grants manager'];
-const PM_MILESTONES = ['Site walk & proposal', 'Permitting', 'Approvals', 'Installation'];
+const PM_MILESTONES = ['Site walk', 'Installation'];
 const TITLE_PRESETS = {
   'CEO': { role: 'admin', is_exec: true },
   'Executive': { is_exec: true, can_review: true },
-  'Account manager': { dd_assessor: true, milestones: ['Send proposal', 'Contract'] },
+  'Account manager': { dd_assessor: true, milestones: ['Proposal', 'Contract'] },
   'Senior project manager': { milestones: PM_MILESTONES },
   'Project manager': { milestones: PM_MILESTONES },
   'Grants manager': { grants: true },
@@ -1274,7 +1351,7 @@ async function renderTeam() {
     return bits.join('') || '<span class="muted small">No duties set</span>';
   };
   view.innerHTML = `
-    <div class="page-head"><div><h1>Team</h1><div class="muted small" style="margin-top:4px">Everyone's work right now${totalLate ? ` · <span class="stale">${totalLate} milestone${totalLate === 1 ? '' : 's'} running late</span>` : ''}. Click a person to see their dashboard.</div></div></div>
+    <div class="page-head"><div><h1>Team</h1><div class="muted small" style="margin-top:4px">Everyone's work right now${totalLate ? ` · <span class="stale">${totalLate} categor${totalLate === 1 ? 'y' : 'ies'} running late</span>` : ''}. Click a person to see their dashboard.</div></div></div>
     <div class="team-list">${people.map((p) => `<a class="team-row ${p.late ? 'has-late' : ''}" href="#/dashboard?as=${p.id}">
         <span class="avatar big">${esc(initials(p.name))}</span>
         <span class="team-who"><b>${esc(p.name)}</b><span class="muted small">${esc(p.title || label(p.role))}${p.states ? ` · ${esc(p.states.replace(/,/g, ', '))}` : ''}</span></span>
@@ -1300,7 +1377,7 @@ const WIDGETS = {
   grants: { title: 'Rebates', link: '#/rebates', linkText: 'Open the Rebates board' },
   sites: { title: 'My sites', link: '#/pipeline', linkText: 'Pipeline' },
   kpis: { title: 'Company numbers' },
-  ms_chart: { title: 'Milestones across open projects' },
+  ms_chart: { title: 'Categories across open projects' },
   attention: { title: 'Needs attention' },
   reminders: { title: 'Reminders' },
   tickets: { title: 'Open tickets', link: '#/tickets', linkText: 'All tickets' },
@@ -1308,7 +1385,7 @@ const WIDGETS = {
   calendar: { title: 'Coming up', link: '#/calendar', linkText: 'Calendar' },
 };
 const widgetIds = () => ['dd', 'review', 'grants', 'sites', ...S.meta.milestones.map((m) => `ms:${m.id}`), 'kpis', 'ms_chart', 'attention', 'calendar', 'reminders', 'tickets', 'activity'];
-const widgetName = (id) => (id.startsWith('ms:') ? (msById(id.slice(3))?.name || 'Milestone') : WIDGETS[id]?.title || id);
+const widgetName = (id) => (id.startsWith('ms:') ? (msById(id.slice(3))?.name || 'Category') : WIDGETS[id]?.title || id);
 // the starting layout for someone who hasn't customized, based on their job
 function defaultLayout(u) {
   const main = [];
@@ -1386,7 +1463,7 @@ async function renderDashboard(asId) {
   };
   const msWidget = (mid) => {
     const g = mine.milestones.find((x) => String(x.id) === String(mid));
-    if (!g) return [null, '<div class="work-empty">This milestone no longer exists.</div>'];
+    if (!g) return [null, '<div class="work-empty">This category no longer exists.</div>'];
     const all = `#/pipeline?milestone_id=${g.id}&ms_status=todo`;
     const section = (title, list, row) => (list.length ? `<div class="work-sub">${title} <span class="muted">${list.length}</span></div>
       <div class="work-list">${list.slice(0, LIM).map(row).join('')}${more(list.length, all)}</div>` : '');
@@ -1428,7 +1505,7 @@ async function renderDashboard(asId) {
     ${dashEdit ? `<div class="card dash-edit">
         <div><b>Customize your dashboard.</b> <span class="muted small">Use the arrows to move widgets, → / ← to switch columns, ✕ to remove. Changes save as you go.</span></div>
         <div class="dash-edit-row">
-          <select id="addWidget"${hidden.length ? '' : ' disabled'}>${hidden.length ? hidden.map((id) => `<option value="${esc(id)}">${esc(widgetName(id))}${id.startsWith('ms:') ? ' (milestone)' : ''}</option>`).join('') : '<option>Every widget is on your dashboard</option>'}</select>
+          <select id="addWidget"${hidden.length ? '' : ' disabled'}>${hidden.length ? hidden.map((id) => `<option value="${esc(id)}">${esc(widgetName(id))}${id.startsWith('ms:') ? ' (category)' : ''}</option>`).join('') : '<option>Every widget is on your dashboard</option>'}</select>
           <button class="btn sm" id="addWidgetBtn" ${hidden.length ? '' : 'disabled'}>Add widget</button>
           <span class="dash-edit-spacer"></span>
           <button class="btn sm" id="editDuties">What I'm responsible for</button>
@@ -1465,7 +1542,7 @@ async function renderDashboard(asId) {
 const dutiesFields = (u) => `
   <label class="check-inline"><input type="checkbox" name="dd_assessor" ${u?.dd_assessor ? 'checked' : ''}> Assesses new due diligence sites (1–5 rating and insight)</label>
   <label class="check-inline"><input type="checkbox" name="grants" ${u?.grants ? 'checked' : ''}> Grants manager: looks after the Rebates board and is told when a site picks a rebate</label>
-  <fieldset class="checkset"><legend>Milestones they own</legend>
+  <fieldset class="checkset"><legend>Categories they own</legend>
     ${S.meta.milestones.map((m) => `<label><input type="checkbox" name="ms_${m.id}" ${myMilestoneIds(u).includes(m.id) ? 'checked' : ''}> ${esc(m.name)}</label>`).join('')}</fieldset>`;
 const readDuties = (d) => {
   const out = { dd_assessor: !!d.dd_assessor, grants: !!d.grants, milestone_ids: Object.keys(d).filter((k) => k.startsWith('ms_')).map((k) => Number(k.slice(3))) };
@@ -1474,7 +1551,7 @@ const readDuties = (d) => {
 };
 function dutiesModal() {
   const card = openModal(`${modalHead('What are you responsible for?')}
-    <p class="muted small" style="margin-top:-6px">Your dashboard lists the work waiting for you in these areas.${myStates().length ? ` Milestone lists only show your territory (${esc(myStates().join(', '))}).` : ''}</p>
+    <p class="muted small" style="margin-top:-6px">Your dashboard lists the work waiting for you in these areas.${myStates().length ? ` Category lists only show your territory (${esc(myStates().join(', '))}).` : ''}</p>
     <form class="grid">${dutiesFields(S.me)}
       ${canReview() ? '<div class="muted small">You also run the 10:30 review, so it shows on your dashboard.</div>' : ''}
       <div class="modal-foot"><button type="button" class="btn" data-close>Cancel</button><button class="btn primary">Save</button></div></form>`);
@@ -1657,7 +1734,7 @@ function reviewModal(p, decision, after) {
       ${p.dd_insight ? `<div class="small dd-insight" style="margin-top:6px">${esc(p.dd_insight)}</div>` : ''}</div>
     ${decision === 'approve' ? (managers.length
       ? `<div class="note-ok small">It moves to the Pipeline with ${esc(siteWalkMs()?.name || 'the site walk')} under way, and <b>${esc(managers.map((u) => u.name).join(', '))}</b> will be notified.</div>`
-      : `<div class="note-warn small">Nobody covers ${esc(siteWalkMs()?.name || 'the site walk')} in ${esc(p.state || 'this state')}, so nobody will be notified. Set people's milestones and territories in Admin.</div>`) : ''}
+      : `<div class="note-warn small">Nobody covers ${esc(siteWalkMs()?.name || 'the site walk')} in ${esc(p.state || 'this state')}, so nobody will be notified. Set people's categories and territories in Admin.</div>`) : ''}
     ${decision === 'info' ? `<div class="muted small" style="margin-bottom:8px">It goes back to To assess${p.assessed_by_name ? `, and ${esc(p.assessed_by_name)} is notified` : ''}.</div>` : ''}
     <form class="grid">
       <label>${cfg.label}<textarea name="note" rows="4" ${cfg.required ? 'required' : ''} placeholder="${esc(cfg.ph)}"></textarea></label>
@@ -1705,14 +1782,14 @@ async function renderPipeline() {
     const line2 = [[p.city, p.state].filter(Boolean).join(', '), p.address ? p.name : '', p.code].filter(Boolean).join(' · ');
     const cls = isFlagged(p) ? 'is-stale' : ['on_hold', 'blocked'].includes(p.status) ? 'is-hold' : '';
     return `<div class="prow ${cls} ${open ? 'open' : ''}">
-      <button class="prow-main" type="button" data-row="${p.id}" aria-expanded="${open}" title="Click to see milestones · double-click to open the site">
+      <button class="prow-main" type="button" data-row="${p.id}" aria-expanded="${open}" title="Click to see the next step · double-click to open the site">
         <span class="prow-addr"><b>${esc(line1)}</b><span class="muted small">${esc(line2)}</span></span>
         ${msTrack(p)}
         <span class="prow-extra small">${p.status !== 'active' ? statusBadge(p.status) : ''}${p.estimated_value ? `<span class="muted">${money(p.estimated_value)}</span>` : ''}</span>
         <span class="caret muted">${open ? '▾' : '▸'}</span>
       </button>
       <div class="prow-detail" ${open ? '' : 'hidden'}>
-        ${msList(p)}
+        ${nextPanel(p)}
         <div class="prow-facts small">
           <span>${p.customer_name ? esc(p.customer_name) : '<span class="muted">No customer</span>'}</span>
           ${p.charger_count ? `<span>${p.charger_count}× ${esc(p.charger_type || 'ports')}</span>` : ''}
@@ -1746,7 +1823,7 @@ async function renderPipeline() {
     <div class="page-head"><h1>Pipeline <span class="muted small">${all.length}</span></h1>
       <div class="actions">${territoryToggle(mine)}<a class="btn" href="#/diligence">Due diligence →</a></div></div>
     <form class="filters" id="pFilters">
-      <select name="milestone_id">${options(msOpts, q.get('milestone_id'), { blank: 'Any milestone' })}</select>
+      <select name="milestone_id">${options(msOpts, q.get('milestone_id'), { blank: 'Any category' })}</select>
       <select name="ms_status" class="${q.get('milestone_id') ? '' : 'hidden'}">${options([['todo', 'Still to do'], ...MS_STATUSES.map((s) => [s, MS_LABEL[s]]), ['overdue', 'Running late']], q.get('ms_status'), { blank: 'Any status' })}</select>
       <select name="progress">${options([['incomplete', 'Still in progress'], ['complete', 'Live (all done)'], ['overdue', 'Running late']], q.get('progress'), { blank: 'All projects' })}</select>
       <button type="button" class="btn sm ghost" id="moreF">${moreOn ? 'Fewer filters' : 'More filters'}</button>
@@ -1759,7 +1836,7 @@ async function renderPipeline() {
       <button class="chip ${stateSel ? '' : 'active'}" data-state="">All states <span>${all.length}</span></button>
       ${keys.map((k) => `<button class="chip ${stateSel === k ? 'active' : ''}" data-state="${esc(k)}" title="${esc(stateName(k))}">${k === 'none' ? 'No state' : esc(k)} <span>${groups[k].length}</span></button>`).join('')}
     </div>
-    <div class="track-legend small muted"><span><i class="tseg t-done"></i>Done</span><span><i class="tseg t-in_progress"></i>In progress</span><span><i class="tseg t-not_started"></i>Not started</span><span><i class="tseg t-in_progress late"></i>Late</span><span class="tl-tip">Click a site for details · double-click to open it</span></div>
+    <div class="track-legend small muted"><span><i class="tseg t-done"></i>Done</span><span><i class="tseg t-in_progress"></i>In progress</span><span><i class="tseg t-not_started"></i>Not started</span><span><i class="tseg t-in_progress late"></i>Late</span><span class="tl-tip">Click a site to see its next step · double-click to open it</span></div>
     ${shown.map(lane).join('') || `<div class="card empty">${stateSel ? 'No projects in this state.' : 'No projects match. Finish due diligence on a property to move it here.'}</div>`}`;
 
   const form = $('#pFilters');
@@ -1795,6 +1872,7 @@ async function renderPipeline() {
   });
   const findP = (id) => all.find((x) => String(x.id) === String(id));
   $$('[data-sitechat]', view).forEach((b) => (b.onclick = () => openChat(findP(b.dataset.sitechat), null, () => renderPipeline())));
+  $$('.prow', view).forEach((row) => bindSteps(row, findP($('[data-row]', row).dataset.row), () => renderPipeline()));
 }
 
 // ---------- projects list ----------
@@ -1816,7 +1894,7 @@ async function renderProjects() {
       <select name="owner_id">${options(S.meta.users.map((u) => [u.id, u.name]), f.owner_id, { blank: 'All owners' })}</select>
       <select name="priority">${options(S.meta.enums.priority, f.priority, { blank: 'Any priority' })}</select>
     </form>
-    <div class="table-wrap"><table><thead><tr><th>Project</th><th>Customer</th><th>Milestones</th><th>Progress</th><th>Status</th><th>Ports</th><th>Value</th><th>Owner</th><th>Tickets</th><th>Target live</th></tr></thead>
+    <div class="table-wrap"><table><thead><tr><th>Project</th><th>Customer</th><th>Categories</th><th>Progress</th><th>Status</th><th>Ports</th><th>Value</th><th>Owner</th><th>Tickets</th><th>Target live</th></tr></thead>
     <tbody>${rows.map((p) => `<tr class="clickable" data-href="#/projects/${p.id}">
       <td><b>${esc(p.name)}</b><div class="muted small">${esc(p.code)}${p.city ? ` · ${esc(p.city)}${p.state ? ', ' + esc(p.state) : ''}` : ''}</div></td>
       <td>${esc(p.customer_name || '—')}</td>
@@ -2106,7 +2184,7 @@ async function renderProject(id) {
         <div style="display:flex;gap:6px;margin-top:6px;flex-wrap:wrap;align-items:center">${progressBadge(p)} ${p.status !== 'active' ? statusBadge(p.status) : ''} ${['high', 'urgent'].includes(p.priority) ? prioBadge(p.priority) : ''}
           ${p.state ? badge('', stateName(p.state)) : ''}
           ${dd ? `<span class="small muted">${p.days_in_phase} days in due diligence</span>`
-            : `<span class="small ${isFlagged(p) ? 'stale' : 'muted'}">${p.days_in_phase} days in pipeline${isFlagged(p) ? ` · ${p.ms_overdue} milestone${p.ms_overdue === 1 ? '' : 's'} running late` : ''}</span>`}</div>
+            : `<span class="small ${isFlagged(p) ? 'stale' : 'muted'}">${p.days_in_phase} days in pipeline${isFlagged(p) ? ` · ${p.ms_overdue} categor${p.ms_overdue === 1 ? 'y' : 'ies'} running late` : ''}</span>`}</div>
         ${p.hold_reason && p.status !== 'active' ? `<div class="small" style="margin-top:6px;color:var(--warn)"><b>Hold reason:</b> ${esc(p.hold_reason)}</div>` : ''}
       </div>
       <div class="actions">
@@ -2149,7 +2227,8 @@ async function renderProject(id) {
       <div style="margin-bottom:6px">${ratingView(p.dd_rating)}</div>
       ${p.dd_insight ? `<div class="dd-insight">${esc(p.dd_insight)}</div><div class="muted small" style="margin-top:6px">Assessed by ${esc(p.assessed_by_name || '—')} · ${fdate(p.dd_assessed_at)}</div>` : '<div class="muted small">No insight written yet.</div>'}
       ${p.dd_stage === 'passed' ? `<div class="small" style="margin-top:8px">Passed by ${esc(p.reviewed_by_name || '—')} · ${fdate(p.dd_reviewed_at)}${p.dd_review_note ? `: “${esc(p.dd_review_note)}”` : ''}</div>` : ''}</div>`
-    : `<div class="card"><div class="card-head"><h2>Milestones</h2><span class="muted small">${p.ms_complete ? 'All done. This site is live.' : `${p.ms_done} of ${p.ms_total} done · in any order`}</span></div>${msList(p)}</div>`}
+    : `<div class="card steps-card"><div class="card-head"><h2>Steps</h2><span class="muted small">${p.ms_complete ? 'All done. This site is live.' : `${p.ms_done} of ${p.ms_total} categories done · the project manager writes the steps`}</span></div>
+      ${nextPanel(p)}${stepBoard(p)}</div>`}
     <div class="cols-main" style="margin-top:16px">
       <div>
         <div class="tabs" style="margin-top:0">${['chat', 'tickets', 'documents', 'timeline', 'activity'].map((t) => `<button class="tab ${projectTab === t ? 'active' : ''}" data-tab="${t}">${label(t)}${t === 'chat' && p.msg_count ? ` (${p.msg_count})` : ''}${t === 'tickets' && p.open_tickets ? ` (${p.open_tickets})` : ''}${t === 'documents' && p.doc_count ? ` (${p.doc_count})` : ''}</button>`).join('')}</div>
@@ -2167,6 +2246,7 @@ async function renderProject(id) {
   $$('[data-pr]', view).forEach((b) => (b.onclick = () => reviewModal(p, b.dataset.pr, (r) => { if (b.dataset.pr === 'approve' && r) location.hash = msHref(p.id, r.milestones.find((x) => x.status === 'in_progress')?.id || r.milestones[0].id); else route(); })));
   bindRebateChips();
   $$('[data-scope]', view).forEach((b) => (b.onclick = () => scopeModal(p, route)));
+  if ($('.steps-card', view)) bindSteps($('.steps-card', view), p, route);
   projectRemindersCard(p, $('#remCard')).catch(() => {});
   projectCalendarCard(p, $('#calCard')).catch(() => {});
   $('#quickStatus').onchange = async (e) => {
@@ -2349,12 +2429,12 @@ async function tabDocuments(p) {
 function tabTimeline(p) {
   const h = p.history || [];
   const items = h.map((x) => `<li><span class="dot" style="background:${esc(x.color || '#94a3b8')}"></span><div>
-      <b>${esc(x.milestone || '(removed milestone)')}</b> <span class="ms ms-${esc(x.to_status)}">${MS_ICON[x.to_status] || ''} ${esc(MS_LABEL[x.to_status] || x.to_status)}</span>
+      <b>${esc(x.milestone || '(removed category)')}</b> <span class="ms ms-${esc(x.to_status)}">${MS_ICON[x.to_status] || ''} ${esc(MS_LABEL[x.to_status] || x.to_status)}</span>
       <div class="muted small">${fdatetime(x.changed_at)} by ${esc(x.user_name || '—')}${x.from_status && x.from_status !== x.to_status ? ` · was ${esc((MS_LABEL[x.from_status] || x.from_status).toLowerCase())}` : ''}</div>
       ${x.note ? `<div class="note small" style="white-space:pre-wrap;background:#f8fafc;border-radius:8px;padding:6px 8px;margin-top:4px">${esc(x.note)}</div>` : ''}</div></li>`);
   const total = Math.round((Date.now() - toDate(p.created_at)) / 86400000);
-  $('#tabBody').innerHTML = `<div class="card"><h2>Milestone history <span class="muted small">— ${total} days since created</span></h2>
-    ${items.length ? `<ul class="timeline">${items.join('')}</ul>` : '<div class="empty">No milestone changes yet.</div>'}</div>`;
+  $('#tabBody').innerHTML = `<div class="card"><h2>Category history <span class="muted small">— ${total} days since created</span></h2>
+    ${items.length ? `<ul class="timeline">${items.join('')}</ul>` : '<div class="empty">No category changes yet.</div>'}</div>`;
 }
 
 async function tabActivity(p) {
@@ -2411,11 +2491,11 @@ async function renderAdmin() {
         </tbody></table></div></div>
       <div class="card"><h2>Milestones</h2>
         <p class="muted small">Every project tracks each of these, in any order, and can mark any of them “not needed”. The order is just how they're displayed.
-          <b>Target days</b> is how long a milestone can be in progress before it's flagged as running late.
+          <b>Target days</b> is how long a category can be in progress before it's flagged as running late.
           <b>Needs document</b> blocks marking it done until that kind of document is uploaded to the project.</p>
         <div class="ms-admin-head small muted"><span>Colour</span><span>Name</span><span>Target days</span><span>Needs document</span><span></span><span></span></div>
         <div id="msList" class="grid" style="gap:6px"></div>
-        <div style="display:flex;justify-content:space-between;margin-top:12px"><button class="btn sm" id="addMs">+ Add milestone</button><button class="btn primary sm" id="saveMs">Save milestones</button></div>
+        <div style="display:flex;justify-content:space-between;margin-top:12px"><button class="btn sm" id="addMs">+ Add category</button><button class="btn primary sm" id="saveMs">Save categories</button></div>
       </div>
     </div>`;
   const draw = () => {
@@ -2472,7 +2552,7 @@ function userForm(u = null) {
       <label class="full check-inline"><input type="checkbox" name="is_exec" ${u?.is_exec ? 'checked' : ''}> Executive: sees the Team page and can open anyone's dashboard</label>
       <label class="full check-inline"><input type="checkbox" name="can_review" ${u?.can_review ? 'checked' : ''}> Runs the 10:30 due diligence review (can approve or pass sites; admins always can)</label>
       <div class="full grid" style="gap:8px">${dutiesFields(u)}</div>
-      <fieldset class="checkset full"><legend>Territory: the states they cover. Their milestone work and pings are limited to these (none = every state)</legend>
+      <fieldset class="checkset full"><legend>Territory: the states they cover. Their category work and pings are limited to these (none = every state)</legend>
         ${[...new Set([...CORE_STATES, ...S.meta.statesInUse, ...String(u?.states || '').split(',').filter(Boolean)])].map((st) => `<label><input type="checkbox" name="st_${st}" ${String(u?.states || '').split(',').includes(st) ? 'checked' : ''}> ${st}</label>`).join('')}</fieldset>
       <div class="modal-foot full"><button type="button" class="btn" data-close>Cancel</button><button class="btn primary">${u ? 'Save' : 'Create user'}</button></div>
     </form>`);

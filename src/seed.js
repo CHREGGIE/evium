@@ -39,10 +39,10 @@ addUser('Michael', 'michael@eviumcharging.com', 'staff', null, 'Grants manager',
   const msId = (n) => milestones.find((m) => m.name === n)?.id;
   const setDuty = db.prepare("UPDATE users SET dd_assessor = ?, milestone_ids = ? WHERE id = ? AND COALESCE(milestone_ids, '') = '' AND dd_assessor = 0");
   // the admin login stands in for the account manager: due diligence, client relationships, sending proposals and contracts
-  setDuty.run(1, [msId('Send proposal'), msId('Contract')].filter(Boolean).join(','), admin);
+  setDuty.run(1, [msId('Proposal'), msId('Contract')].filter(Boolean).join(','), admin);
   db.prepare("UPDATE users SET title = COALESCE(title, 'Account manager') WHERE id = ?").run(admin);
-  // project managers: site walk & proposal, then the field work, in their territory
-  userIds.forEach((id) => setDuty.run(0, ['Site walk & proposal', 'Permitting', 'Approvals', 'Installation'].map(msId).filter(Boolean).join(','), id));
+  // project managers: the site walk, then permitting and installation, in their territory
+  userIds.forEach((id) => setDuty.run(0, ['Site walk', 'Installation'].map(msId).filter(Boolean).join(','), id));
 }
 
 // ---------- utility directory (sample entries: add your own contacts) ----------
@@ -131,8 +131,8 @@ if (seedDirectory) {
   }))();
 }
 
-// Milestone codes, one letter per default milestone in order
-// (Site walk & proposal, Send proposal, Contract, Permitting, Approvals, Installation):
+// Progress codes, one letter per stage in order
+// (site walk, proposal, contract, permitting, approvals, installation); the last three make up the Installation category:
 //   D = done, I = in progress, N = not needed, - = not started.
 // They deliberately don't all follow the same order — e.g. approvals done before permitting.
 // [name, customer, contact, email, phone, address, city, state, zip, site type, charger type, ports, kW, value,
@@ -227,6 +227,19 @@ const siteOwner = (pid) => db.prepare('SELECT owner_id FROM projects WHERE id = 
 const insPR = db.prepare('INSERT OR IGNORE INTO project_rebates (project_id, rebate_id, position) VALUES (?,?,?)');
 const linkRebates = (pid, keys) => keys.forEach((k, i) => rebateId[k] && insPR.run(pid, rebateId[k], i));
 const CODE = { D: 'done', I: 'in_progress', N: 'not_needed' };
+// six-letter progress code -> one letter per category (permitting + approvals + installation = Installation)
+const toCategories = (code) => {
+  const c = [...code]; const tail = c.slice(3); const live = tail.filter((x) => x !== 'N');
+  const inst = !live.length ? 'N' : live.every((x) => x === 'D') ? 'D' : live.some((x) => x !== '-') ? 'I' : '-';
+  return [c[0], c[1], c[2], inst].join('');
+};
+// The steps project managers wrote on the demo sites. [label, written by the PM (true) or a starting step (false)]
+const DEMO_STEPS = {
+  'Site walk': [['Schedule a site walk', false], ['Walk the site with 3 electricians', true], ['Get the electrical quotes', false], ['Pick the best quote', false], ['Draft the charger layout', true]],
+  'Proposal': [['Create the proposal', false], ['Confirm the rebate amount with Michael', true], ['Send the proposal', false], ['Follow up with the customer', true], ['Customer accepts the proposal', false]],
+  'Contract': [['Send the contract', false], ["Answer the customer's legal questions", true], ['Contract signed', false], ['Collect the deposit', true]],
+  'Installation': [['Submit permits', false], ['Utility service application', true], ['Permits approved', false], ['Order the chargers', true], ['Schedule the installation', false], ['Pass the electrical inspection', true], ['Installation done', false]],
+};
 // the owner of each site is whoever covers that state
 const ownerFor = (state, i) => userIds[staff.findIndex((s) => s[3].split(',').includes(state))] || userIds[i % userIds.length];
 
@@ -245,16 +258,21 @@ if (seedPipeline) db.transaction(() => {
     insA.run(pid, owner, 'project_created', name);
     linkRebates(pid, rebates);
     let k = 0;
-    [...code].forEach((c, mi) => {
+    [...toCategories(code)].forEach((c, mi) => {
       const st = CODE[c]; if (!st) return;
       const m = milestones[mi]; if (!m) return;
-      // copy the milestone's steps: all ticked when done, about half ticked when in progress
-      const tmpl = db.prepare('SELECT label, position FROM milestone_steps WHERE milestone_id = ? ORDER BY position').all(m.id);
+      // the PM's steps: every other site has the extra ones, so the flows differ. All ticked when done, about half when in progress.
+      db.prepare('INSERT OR IGNORE INTO project_step_seeds (project_id, milestone_id) VALUES (?,?)').run(pid, m.id);
+      const list = (DEMO_STEPS[m.name] || []).filter(([, byPm], si) => !byPm || (i + si) % 2 === 0);
       if (st !== 'not_needed') {
-        const ticked = st === 'done' ? tmpl.length : Math.floor(tmpl.length / 2);
-        tmpl.forEach((s, si) => db.prepare(`INSERT INTO project_steps (project_id, milestone_id, label, position, done_at, done_by)
-          VALUES (?,?,?,?, ${si < ticked ? `datetime('now', '-${Math.max(1, daysIn - si)} days')` : 'NULL'}, ?)`)
-          .run(pid, m.id, s.label, s.position, si < ticked ? owner : null));
+        const ticked = st === 'done' ? list.length : Math.max(1, Math.floor(list.length / 2));
+        list.forEach(([label, byPm], si) => {
+          const done = si < ticked;
+          const due = !done && si === ticked ? `${(i % 3) - 1 >= 0 ? '+' : ''}${(i % 3) * 3 - 2} days` : null; // the next step gets a due date (some late)
+          db.prepare(`INSERT INTO project_steps (project_id, milestone_id, label, position, done_at, done_by, created_by, due_on)
+            VALUES (?,?,?,?, ${done ? `datetime('now', '-${Math.max(1, daysIn - si * 2)} days', '-${(i * 37 + si * 13) % 600} minutes')` : 'NULL'}, ?, ?, ${due ? `date('now', '${due}')` : 'NULL'})`)
+            .run(pid, m.id, label, si, done ? owner : null, byPm ? owner : null);
+        });
       }
       if (st === 'done') {
         const startAgo = createdDaysAgo - 3 - k * 8; const endAgo = Math.max(daysIn + 1, startAgo - 7); k++;
@@ -294,10 +312,10 @@ if (seedPipeline) db.transaction(() => {
   [
     [1, 0, 0, 'Kicked this one off with Dana. She wants chargers live before the holiday rush.', '-60 days'],
     [1, 4, 0, 'Permit submitted to the City of Austin. Their portal says 4–6 weeks.', '-40 days'],
-    [1, 5, 1, 'Landlord approval came back early, so approvals are done even though the permit is still out.', '-30 days'],
+    [1, 4, 1, 'Landlord approval came back early, so that step is done even though the permit is still out.', '-30 days'],
     [1, 4, 2, 'Plan review came back with comments on the load calc. Working on a response.', '-3 days'],
     [1, 4, 0, 'Sent the revised load calc this morning. @JoJo can you take a look before it goes back to the city?', '-1 days'],
-    [2, 5, 0, 'CenterPoint still has no date for the transformer upgrade. Escalated to our utility rep.', '-10 days'],
+    [2, 4, 0, 'CenterPoint still has no date for the transformer upgrade. Escalated to our utility rep.', '-10 days'],
     [2, 0, 0, 'Customer is asking if we can start trenching while we wait on the utility.', '-2 days'],
     [13, 0, 1, 'Stacking Con Ed PowerReady with Charge Ready NY here. Owner is happy with the numbers.', '-4 days'],
   ].forEach(([pi, pos, ui, body, ago]) => {
@@ -346,7 +364,7 @@ if (seedPipeline) db.transaction(() => {
   // follow-up reminders (one due today for the admin, so the Dashboard shows it)
   const insRem = db.prepare(`INSERT INTO reminders (project_id, milestone_id, user_id, created_by, due_on, text) VALUES (?,?,?,?, date('now', ?), ?)`);
   insRem.run(1, milestones[3]?.id ?? null, admin, admin, '+0 days', 'Chase City of Austin on the plan review');
-  insRem.run(2, milestones[4]?.id ?? null, userIds[0], admin, '+2 days', 'Call CenterPoint for a transformer date');
+  insRem.run(2, milestones[3]?.id ?? null, userIds[0], admin, '+2 days', 'Call CenterPoint for a transformer date');
   insRem.run(3, milestones[1]?.id ?? null, userIds[1], admin, '-1 days', 'Send Oakwood the revised proposal');
 })();
 

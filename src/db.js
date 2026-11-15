@@ -15,9 +15,12 @@ const db = new DatabaseSync(path.join(DATA_DIR, 'evium-crm.db'));
 db.exec('PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 5000;');
 
 // better-sqlite3-style transaction helper: db.transaction(fn)(...args)
+// (a transaction started inside another one just joins it)
+let txDepth = 0;
 db.transaction = (fn) => (...args) => {
-  db.exec('BEGIN');
-  try { const r = fn(...args); db.exec('COMMIT'); return r; } catch (e) { db.exec('ROLLBACK'); throw e; }
+  if (txDepth) return fn(...args);
+  db.exec('BEGIN'); txDepth++;
+  try { const r = fn(...args); txDepth--; db.exec('COMMIT'); return r; } catch (e) { txDepth = 0; db.exec('ROLLBACK'); throw e; }
 };
 
 db.exec(`
@@ -228,13 +231,12 @@ CREATE TABLE IF NOT EXISTS messages (
 CREATE INDEX IF NOT EXISTS idx_messages_project ON messages(project_id, created_at);
 `);
 
+// The four categories every site moves through. The project manager writes the steps inside each one.
 const DEFAULT_MILESTONES = [
-  ['Site walk & proposal', '#38bdf8', 21],   // project manager: walk the site and create the proposal
-  ['Send proposal', '#a78bfa', 14],          // account manager: send it and get it accepted
-  ['Contract', '#f472b6', 21],
-  ['Permitting', '#f59e0b', 45],
-  ['Approvals', '#eab308', 45],
-  ['Installation', '#22c55e', 30],
+  ['Site walk', '#38bdf8', 21],      // project manager: electricians walk the site and quote it
+  ['Proposal', '#a78bfa', 14],       // create the proposal, account manager sends it
+  ['Contract', '#f472b6', 21],       // contract sent and signed
+  ['Installation', '#22c55e', 90],   // permitting and installation
 ];
 const MS_STATUSES = ['not_started', 'in_progress', 'done', 'not_needed'];
 
@@ -244,15 +246,13 @@ if (db.prepare('SELECT COUNT(*) c FROM milestones').get().c === 0) {
 
   // One-time conversion: turn each pipeline project's old single stage into milestone statuses.
   // [milestones done, milestone in progress] for each of the original default stage names.
+  const SPC = ['Site walk', 'Proposal', 'Contract'];
   const STAGE_MAP = {
-    'Lead': [[], null], 'Qualified': [[], null], 'Site Survey': [[], 'Site walk & proposal'],
-    'Proposal Sent': [['Site walk & proposal'], 'Send proposal'], 'Contract Signed': [['Site walk & proposal', 'Send proposal', 'Contract'], null],
-    'Design & Engineering': [['Site walk & proposal', 'Send proposal', 'Contract'], 'Permitting'],
-    'Permitting': [['Site walk & proposal', 'Send proposal', 'Contract'], 'Permitting'],
-    'Utility / Make-Ready': [['Site walk & proposal', 'Send proposal', 'Contract', 'Permitting'], 'Approvals'],
-    'Installation': [['Site walk & proposal', 'Send proposal', 'Contract', 'Permitting', 'Approvals'], 'Installation'],
-    'Commissioning': [['Site walk & proposal', 'Send proposal', 'Contract', 'Permitting', 'Approvals', 'Installation'], null],
-    'Live / Operational': [['Site walk & proposal', 'Send proposal', 'Contract', 'Permitting', 'Approvals', 'Installation'], null],
+    'Lead': [[], null], 'Qualified': [[], null], 'Site Survey': [[], 'Site walk'],
+    'Proposal Sent': [['Site walk'], 'Proposal'], 'Contract Signed': [SPC, null],
+    'Design & Engineering': [SPC, 'Installation'], 'Permitting': [SPC, 'Installation'], 'Utility / Make-Ready': [SPC, 'Installation'],
+    'Installation': [SPC, 'Installation'],
+    'Commissioning': [[...SPC, 'Installation'], null], 'Live / Operational': [[...SPC, 'Installation'], null],
   };
   const ms = Object.fromEntries(db.prepare('SELECT id, name FROM milestones').all().map((m) => [m.name, m.id]));
   const rows = db.prepare(`SELECT p.id, p.stage_entered_at, s.name AS stage FROM projects p JOIN stages s ON s.id = p.stage_id
@@ -260,8 +260,8 @@ if (db.prepare('SELECT COUNT(*) c FROM milestones').get().c === 0) {
   const insPM = db.prepare('INSERT OR IGNORE INTO project_milestones (project_id, milestone_id, status, started_at, completed_at, updated_at) VALUES (?,?,?,?,?,?)');
   db.transaction(() => rows.forEach((r) => {
     const [done, active] = STAGE_MAP[r.stage] || [[], null];
-    done.forEach((n) => insPM.run(r.id, ms[n], 'done', null, r.stage_entered_at, r.stage_entered_at));
-    if (active) insPM.run(r.id, ms[active], 'in_progress', r.stage_entered_at, null, r.stage_entered_at);
+    done.forEach((n) => ms[n] && insPM.run(r.id, ms[n], 'done', null, r.stage_entered_at, r.stage_entered_at));
+    if (active && ms[active]) insPM.run(r.id, ms[active], 'in_progress', r.stage_entered_at, null, r.stage_entered_at);
   }))();
 }
 
@@ -485,7 +485,15 @@ CREATE INDEX IF NOT EXISTS idx_psteps ON project_steps(project_id, milestone_id,
 `);
 addColumns('documents', { milestone_id: 'INTEGER REFERENCES milestones(id) ON DELETE SET NULL' });
 
+// The main steps each category starts with. The project manager adds the rest for each site.
 const DEFAULT_STEPS = {
+  'Site walk': ['Schedule a site walk', 'Get the electrical quotes', 'Pick the best quote'],
+  'Proposal': ['Create the proposal', 'Send the proposal', 'Customer accepts the proposal'],
+  'Contract': ['Send the contract', 'Contract signed'],
+  'Installation': ['Submit permits', 'Permits approved', 'Schedule the installation', 'Installation done'],
+};
+// earlier versions' defaults (only used by the one-time migrations below)
+const LEGACY_STEPS = {
   'Site walk & proposal': ['Book site walks with up to 3 electricians', 'Site walks done', 'Collect the electrical quotes', 'Pick the best quote',
     'Draft charger layout', 'Confirm rebate amount', 'Create and price the proposal'],
   'Send proposal': ['Review the proposal', 'Send proposal to customer', 'Follow up with customer', 'Customer feedback / revisions', 'Customer accepts proposal'],
@@ -503,7 +511,7 @@ const DEFAULT_STEPS = {
     if (cur.join('|') === OLD.join('|')) {
       db.transaction(() => {
         db.prepare('DELETE FROM milestone_steps WHERE milestone_id = ?').run(sw.id);
-        DEFAULT_STEPS['Site walk & proposal'].forEach((l, i) => db.prepare('INSERT INTO milestone_steps (milestone_id, label, position) VALUES (?,?,?)').run(sw.id, l, i));
+        LEGACY_STEPS['Site walk & proposal'].forEach((l, i) => db.prepare('INSERT INTO milestone_steps (milestone_id, label, position) VALUES (?,?,?)').run(sw.id, l, i));
       })();
     }
   }
@@ -525,8 +533,93 @@ if (db.prepare('SELECT COUNT(*) c FROM milestone_steps').get().c === 0) {
     db.transaction(() => {
       db.prepare("UPDATE milestones SET name = ?, sla_days = 21, required_docs = 'proposal' WHERE id = ?").run('Site walk & proposal', walk.id);
       db.prepare('UPDATE milestones SET name = ?, required_docs = NULL WHERE id = ?').run('Send proposal', prop.id);
-      setSteps(walk.id, DEFAULT_STEPS['Site walk & proposal']);
-      setSteps(prop.id, DEFAULT_STEPS['Send proposal']);
+      setSteps(walk.id, LEGACY_STEPS['Site walk & proposal']);
+      setSteps(prop.id, LEGACY_STEPS['Send proposal']);
+    })();
+  }
+}
+
+
+// ---------- steps: written per site by the project manager ----------
+addColumns('project_steps', { created_by: 'INTEGER REFERENCES users(id) ON DELETE SET NULL', due_on: 'TEXT' });
+// which (site, category) pairs already got their starting steps, so deleting every step doesn't bring them back
+db.exec(`CREATE TABLE IF NOT EXISTS project_step_seeds (
+  project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  milestone_id INTEGER NOT NULL REFERENCES milestones(id) ON DELETE CASCADE,
+  PRIMARY KEY (project_id, milestone_id)
+)`);
+db.exec('INSERT OR IGNORE INTO project_step_seeds (project_id, milestone_id) SELECT DISTINCT project_id, milestone_id FROM project_steps');
+
+// one-time: six milestones become four categories.
+// Site walk & proposal -> Site walk, Send proposal -> Proposal, and Permitting + Approvals fold into Installation.
+{
+  const byName = (n) => db.prepare('SELECT * FROM milestones WHERE name = ?').get(n);
+  const sw = byName('Site walk & proposal');
+  if (sw) {
+    db.transaction(() => {
+      const sp = byName('Send proposal'); const ct = byName('Contract');
+      let inst = byName('Installation');
+      if (!inst) {
+        const pos = db.prepare('SELECT COALESCE(MAX(position), 0) + 1 n FROM milestones').get().n;
+        inst = { id: db.prepare("INSERT INTO milestones (name, position, color, sla_days) VALUES ('Installation', ?, '#22c55e', 90)").run(pos).lastInsertRowid };
+      }
+      const merged = ['Permitting', 'Approvals'].map(byName).filter(Boolean);
+      // steps keep their order: permitting, then approvals, then installation
+      db.prepare('UPDATE project_steps SET position = position + 200 WHERE milestone_id = ?').run(inst.id);
+      merged.forEach((m, i) => db.prepare('UPDATE project_steps SET milestone_id = ?, position = position + ? WHERE milestone_id = ?').run(inst.id, i * 100, m.id));
+      const statusRank = (rows) => {
+        const live = rows.filter((r) => r.status !== 'not_needed');
+        if (!rows.length) return null;
+        if (!live.length) return 'not_needed';
+        if (live.every((r) => r.status === 'done')) return 'done';
+        if (live.some((r) => r.status !== 'not_started')) return 'in_progress';
+        return 'not_started';
+      };
+      const ids = [inst.id, ...merged.map((m) => m.id)];
+      const q = ids.map(() => '?').join(',');
+      const pms = db.prepare(`SELECT * FROM project_milestones WHERE milestone_id IN (${q})`).all(...ids);
+      const byProject = {};
+      pms.forEach((r) => (byProject[r.project_id] ||= []).push(r));
+      for (const [pid, rows] of Object.entries(byProject)) {
+        const status = statusRank(rows);
+        const started = rows.map((r) => r.started_at).filter(Boolean).sort()[0] || null;
+        const completed = status === 'done' ? rows.map((r) => r.completed_at).filter(Boolean).sort().pop() || null : null;
+        const updated = rows.map((r) => r.updated_at).filter(Boolean).sort().pop();
+        db.prepare(`DELETE FROM project_milestones WHERE project_id = ? AND milestone_id IN (${q})`).run(pid, ...ids);
+        db.prepare('INSERT INTO project_milestones (project_id, milestone_id, status, started_at, completed_at, updated_at) VALUES (?,?,?,?,?,?)')
+          .run(pid, inst.id, status, status === 'not_started' ? null : started, completed, updated);
+      }
+      for (const m of merged) {
+        for (const t of ['documents', 'reminders', 'events', 'notifications', 'milestone_history']) {
+          db.prepare(`UPDATE ${t} SET milestone_id = ? WHERE milestone_id = ?`).run(inst.id, m.id);
+        }
+        db.prepare("UPDATE messages SET milestone_id = ?, milestone_name = 'Installation' WHERE milestone_id = ?").run(inst.id, m.id);
+        db.prepare('INSERT OR IGNORE INTO project_step_seeds (project_id, milestone_id) SELECT project_id, ? FROM project_step_seeds WHERE milestone_id = ?').run(inst.id, m.id);
+      }
+      // people who owned Permitting or Approvals now own Installation
+      const gone = new Set(merged.map((m) => m.id));
+      db.prepare("SELECT id, milestone_ids FROM users WHERE COALESCE(milestone_ids, '') <> ''").all().forEach((u) => {
+        const list = String(u.milestone_ids).split(',').map(Number).filter(Boolean);
+        if (!list.some((x) => gone.has(x))) return;
+        const next = [...new Set(list.map((x) => (gone.has(x) ? inst.id : x)))];
+        db.prepare('UPDATE users SET milestone_ids = ? WHERE id = ?').run(next.join(','), u.id);
+      });
+      merged.forEach((m) => db.prepare('DELETE FROM milestones WHERE id = ?').run(m.id));
+      db.prepare("UPDATE milestones SET name = 'Site walk', required_docs = NULL WHERE id = ?").run(sw.id);
+      if (sp) db.prepare("UPDATE milestones SET name = 'Proposal', required_docs = 'proposal' WHERE id = ?").run(sp.id);
+      db.prepare('UPDATE milestones SET sla_days = 90 WHERE id = ?').run(inst.id);
+      db.prepare("UPDATE messages SET milestone_name = 'Site walk' WHERE milestone_id = ?").run(sw.id);
+      if (sp) db.prepare("UPDATE messages SET milestone_name = 'Proposal' WHERE milestone_id = ?").run(sp.id);
+      // order: site walk, proposal, contract, installation, then anything custom
+      const order = [sw.id, sp?.id, ct?.id, inst.id].filter(Boolean);
+      const rest = db.prepare('SELECT id FROM milestones ORDER BY position').all().map((r) => r.id).filter((id) => !order.includes(id));
+      [...order, ...rest].forEach((id, i) => db.prepare('UPDATE milestones SET position = ? WHERE id = ?').run(i + 1, id));
+      // new starting steps for sites that haven't opened a category yet
+      for (const [name, labels] of Object.entries(DEFAULT_STEPS)) {
+        const m = byName(name); if (!m) continue;
+        db.prepare('DELETE FROM milestone_steps WHERE milestone_id = ?').run(m.id);
+        labels.forEach((l, i) => db.prepare('INSERT INTO milestone_steps (milestone_id, label, position) VALUES (?,?,?)').run(m.id, l, i));
+      }
     })();
   }
 }
