@@ -307,7 +307,7 @@ function notifyHandoff(projectId, milestone, actorId) {
   const where = `${p.code} ${p.name}${p.city ? ` (${p.city}, ${p.state})` : ''}`;
   const next = all.slice(all.findIndex((m) => m.id === milestone.id) + 1).find((m) => !finished(m)) || all.find((m) => !finished(m));
   if (!next) {
-    notify([p.owner_id], { kind: 'handoff', projectId, actorId, text: `${actor} finished ${milestone.name} on ${where}. Every category is done: this site is live.` });
+    notify([p.owner_id], { kind: 'handoff', projectId, actorId, text: `${actor} finished ${milestone.name} on ${where}. Every milestone is done: this site is live.` });
     return;
   }
   notify(milestoneOwners(next.id, p.state).map((u) => u.id), { kind: 'handoff', projectId, milestoneId: next.id, actorId,

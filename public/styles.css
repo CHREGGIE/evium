@@ -745,3 +745,53 @@ h2 { font-size: 15px; }
 .step-tools { align-items: center; }
 .step-tools .step-del { visibility: visible; }
 @media (max-width: 700px) { .steps li { grid-template-columns: minmax(0, 1fr) auto; } .steps li .step-meta { grid-column: 1 / -1; } }
+
+/* ---------- milestones across the top of a site + the picked milestone ---------- */
+.mstep { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; }
+.mstep-item { display: flex; align-items: center; gap: 10px; text-align: left; padding: 10px 12px; border: 1px solid var(--line); border-radius: 10px; background: #fff; cursor: pointer; font: inherit; color: var(--ink); min-width: 0; text-decoration: none; position: relative; }
+.mstep-item:hover { border-color: #cbd5e1; background: #fafbfc; }
+.mstep-item.sel { border-color: var(--mc); box-shadow: 0 0 0 2px color-mix(in srgb, var(--mc) 25%, transparent); background: #fff; }
+.mstep-icon { flex: none; width: 28px; height: 28px; border-radius: 50%; display: grid; place-items: center; font-weight: 700; font-size: 13px; background: #eef2f6; color: #64748b; }
+.mstep-item.s-done .mstep-icon { background: #16a34a; color: #fff; font-size: 15px; }
+.mstep-item.s-in_progress .mstep-icon { background: var(--mc); color: #fff; }
+.mstep-item.s-in_progress.late .mstep-icon { background: #dc2626; }
+.mstep-item.s-not_needed { opacity: .6; }
+.mstep-text { display: grid; min-width: 0; }
+.mstep-text b { font-size: 14px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.mstep-text span { font-size: 12px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.mstep-item.late .mstep-text span { color: #dc2626; }
+.ms-card { padding: 12px; }
+.ms-panel { display: grid; grid-template-columns: minmax(0, 1.25fr) minmax(0, 1fr); gap: 16px; margin-top: 14px; }
+.ms-panel-steps { padding: 4px 6px; min-width: 0; }
+.ms-panel-steps h2 { display: flex; align-items: center; gap: 8px; margin: 0; }
+.ms-panel-chat { border-left: 1px solid var(--line); padding: 4px 4px 4px 16px; min-width: 0; }
+.ms-panel-chat h2 { margin: 0 0 10px; }
+.ms-panel-chat .chat-log { max-height: 320px; }
+.ms-panel-more { display: inline-block; margin-top: 12px; color: var(--muted); }
+.ms-panel-more:hover { color: var(--brand); }
+.psteps { list-style: none; margin: 0 0 8px; padding: 0; }
+.psteps li { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 2px 8px; align-items: start; padding: 7px 8px; border-bottom: 1px solid var(--line); border-radius: 6px; }
+.psteps li:last-child { border-bottom: 0; }
+.psteps li label { display: flex; gap: 8px; align-items: flex-start; cursor: pointer; font-size: 14px; font-weight: 400; color: var(--ink); min-width: 0; }
+.psteps li input[type=checkbox] { width: 16px; height: 16px; padding: 0; flex: none; margin-top: 2px; accent-color: #16a34a; }
+.psteps li label span { min-width: 0; overflow-wrap: anywhere; }
+.psteps li.is-done label span { color: var(--muted); text-decoration: line-through; }
+.psteps li.is-next { background: #ecfdf3; border-bottom-color: transparent; }
+.psteps .ss-meta { grid-column: 1 / -1; padding-left: 24px; font-size: 12px; color: var(--muted); }
+.psteps .ss-meta:empty { display: none; }
+.stage-panel { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 2fr); border: 1px solid var(--line); border-radius: 10px; background: #fff; margin: 4px 0 10px; }
+.stage-col { padding: 12px 14px; min-width: 0; }
+.stage-next { border-left: 1px solid var(--line); background: #f6fbf8; border-radius: 0 10px 10px 0; }
+.stage-name { display: flex; align-items: center; gap: 7px; font-weight: 600; font-size: 15px; }
+.stage-name .dot { width: 9px; height: 9px; border-radius: 50%; }
+.stage-step { font-weight: 600; font-size: 15px; }
+.stage-live { padding: 12px 14px; color: #15803d; font-weight: 600; }
+@media (max-width: 900px) {
+  .mstep { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .ms-panel { grid-template-columns: minmax(0, 1fr); }
+  .ms-panel-chat { border-left: 0; border-top: 1px solid var(--line); padding: 14px 4px 0; }
+}
+@media (max-width: 640px) {
+  .stage-panel { grid-template-columns: minmax(0, 1fr); }
+  .stage-next { border-left: 0; border-top: 1px solid var(--line); border-radius: 0 0 10px 10px; }
+}
