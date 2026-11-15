@@ -739,12 +739,12 @@ const stagePanel = (p) => {
 const msStepper = (p, selId, { link = false } = {}) => `<div class="mstep" role="tablist">${S.meta.milestones.map((m, i) => {
   const x = p.milestones[i];
   const icon = x.status === 'done' ? '✓' : x.status === 'not_needed' ? '–' : String(i + 1);
-  const sub = x.status === 'done' ? `Done ${fdate(x.completed_at)}` : x.status === 'in_progress' ? `${x.days_open ?? 0} days${x.overdue ? ' · late' : ''}` : x.status === 'not_needed' ? 'Not needed' : 'Not started';
+  const sub = x.status === 'done' ? `Done ${fdate(x.completed_at)}` : x.status === 'in_progress' ? `${x.days_open ?? 0} day${x.days_open === 1 ? '' : 's'}` : x.status === 'not_needed' ? 'Not needed' : 'Not started';
   const attrs = link ? `href="${msHref(p.id, m.id)}"` : `type="button" data-mspick="${m.id}"`;
   const tag = link ? 'a' : 'button';
   return `<${tag} ${attrs} role="tab" aria-selected="${String(m.id) === String(selId)}" class="mstep-item s-${x.status}${x.overdue ? ' late' : ''}${String(m.id) === String(selId) ? ' sel' : ''}" style="--mc:${esc(m.color)}">
     <span class="mstep-icon">${icon}</span>
-    <span class="mstep-text"><b>${esc(m.name)}</b><span>${esc(sub)}${x.steps_total && x.status !== 'not_needed' && x.status !== 'done' ? ` · ${x.steps_done}/${x.steps_total} steps` : ''}</span></span></${tag}>`;
+    <span class="mstep-text"><b>${esc(m.name)}</b><span class="mstep-sub">${esc(sub)}</span></span></${tag}>`;
 }).join('')}</div>`;
 // one milestone opened on the site page: where it's up to, its steps, and its conversation
 const msPanel = (p, mid) => {

@@ -797,3 +797,6 @@ h2 { font-size: 15px; }
 }
 /* milestone numbers stay grey until the milestone is done (then a green check) */
 .mstep-item.s-in_progress .mstep-icon, .mstep-item.s-in_progress.late .mstep-icon { background: #eef2f6; color: #64748b; }
+/* days in the milestone: amber while in progress, red once it's past its target */
+.mstep-item.s-in_progress .mstep-sub { color: #b45309; font-weight: 600; }
+.mstep-item.s-in_progress.late .mstep-sub { color: #dc2626; }
