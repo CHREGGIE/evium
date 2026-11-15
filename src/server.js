@@ -403,8 +403,13 @@ app.patch('/api/steps/:id', wrap((req, res) => {
       db.prepare('UPDATE project_steps SET due_on = ? WHERE id = ?').run(due, s.id);
     }
     if (['up', 'down'].includes(req.body?.move)) {
-      const list = db.prepare('SELECT id FROM project_steps WHERE project_id = ? AND milestone_id = ? ORDER BY position, id').all(s.project_id, s.milestone_id).map((r) => r.id);
-      const i = list.indexOf(s.id); const j = req.body.move === 'up' ? i - 1 : i + 1;
+      const rows = db.prepare('SELECT id, done_at FROM project_steps WHERE project_id = ? AND milestone_id = ? ORDER BY position, id').all(s.project_id, s.milestone_id);
+      const list = rows.map((r) => r.id);
+      const i = list.indexOf(s.id);
+      // swap with the nearest step that's in the same list (open or checked off), since checked-off steps are hidden
+      const same = (k) => !!rows[k].done_at === !!s.done_at;
+      let j = i;
+      do { j += req.body.move === 'up' ? -1 : 1; } while (j >= 0 && j < list.length && !same(j));
       if (j >= 0 && j < list.length) {
         [list[i], list[j]] = [list[j], list[i]];
         list.forEach((id, k) => db.prepare('UPDATE project_steps SET position = ? WHERE id = ?').run(k, id));

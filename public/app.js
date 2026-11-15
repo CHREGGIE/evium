@@ -754,6 +754,19 @@ const msStepper = (p, selId, { link = false } = {}) => { const cur = msCurrent(p
     <span class="mstep-icon">${icon}</span>
     <span class="mstep-text"><b>${esc(m.name)}</b>${sub ? `<span class="mstep-sub">${esc(sub)}</span>` : ''}</span></${tag}>`;
 }).join('')}</div>`; };
+// checked-off steps hide behind a small arrow; open it to see them (remembered on this device)
+let showDoneSteps = false;
+try { showDoneSteps = localStorage.getItem('evium.showDoneSteps') === '1'; } catch { /* private window */ }
+const doneSteps = (done, wrap, row) => (done.length ? `<div class="done-wrap ${showDoneSteps ? 'open' : ''}">
+  <button type="button" class="done-toggle" data-donetoggle aria-expanded="${showDoneSteps}"><span class="done-caret" aria-hidden="true">▸</span>${done.length} completed step${done.length === 1 ? '' : 's'}</button>
+  <div class="done-list">${wrap(done.map(row).join(''))}</div></div>` : '');
+document.addEventListener('click', (e) => {
+  const b = e.target.closest('[data-donetoggle]'); if (!b) return;
+  showDoneSteps = !showDoneSteps;
+  try { localStorage.setItem('evium.showDoneSteps', showDoneSteps ? '1' : '0'); } catch { /* ignore */ }
+  $$('.done-wrap').forEach((w) => w.classList.toggle('open', showDoneSteps));
+  $$('[data-donetoggle]').forEach((x) => x.setAttribute('aria-expanded', String(showDoneSteps)));
+});
 // one milestone opened on the site page: where it's up to, its steps, and its conversation
 const msPanel = (p, mid) => {
   const i = S.meta.milestones.findIndex((m) => String(m.id) === String(mid)); const m = S.meta.milestones[i]; const x = p.milestones[i];
@@ -765,11 +778,14 @@ const msPanel = (p, mid) => {
       <div class="card-head"><h2><span class="ms-dot" style="background:${esc(m.color)}"></span>${esc(m.name)}</h2>${msStatusPill(x.status, x.overdue)}</div>
       <div class="muted small" style="margin:-6px 0 10px">${esc(msMeta(x))}${steps.length ? ` · ${x.steps_done} of ${x.steps_total} steps done` : ''}</div>
       ${x.status === 'not_needed' ? '<div class="muted small">Not needed for this site.</div>' : `
-      <ul class="psteps">${steps.map((st) => `<li class="${st.done_at ? 'is-done' : ''} ${nextHere?.id === st.id ? 'is-next' : ''}">
-          <label><input type="checkbox" data-bstep="${st.id}" ${st.done_at ? 'checked' : ''}><span>${esc(st.label)}</span></label>
+      ${doneSteps(steps.filter((st) => st.done_at), (rows) => `<ul class="psteps">${rows}</ul>`, (st) => `<li class="is-done">
+          <label><input type="checkbox" data-bstep="${st.id}" checked><span>${esc(st.label)}</span></label><span></span>
+          <span class="ss-meta">${esc(st.done_by_name || '')}${st.done_by_name ? ' · ' : ''}${esc(fdate(st.done_at))}</span></li>`)}
+      <ul class="psteps">${steps.filter((st) => !st.done_at).map((st) => `<li class="${nextHere?.id === st.id ? 'is-next' : ''}">
+          <label><input type="checkbox" data-bstep="${st.id}"><span>${esc(st.label)}</span></label>
           ${nextHere?.id === st.id ? '<span class="ss-next">Next</span>' : '<span></span>'}
-          <span class="ss-meta">${st.done_at ? `${esc(st.done_by_name || '')}${st.done_by_name ? ' · ' : ''}${esc(fdate(st.done_at))}` : [dueText(st), st.created_by_name ? `added by ${esc(st.created_by_name)}` : ''].filter(Boolean).join(' · ')}</span>
-        </li>`).join('') || '<li class="ss-empty muted small">No steps yet. Write the first one below.</li>'}</ul>
+          <span class="ss-meta">${[dueText(st), st.created_by_name ? `added by ${esc(st.created_by_name)}` : ''].filter(Boolean).join(' · ')}</span>
+        </li>`).join('') || `<li class="ss-empty muted small">${steps.length ? 'Every step is checked off. Write the next one below.' : 'No steps yet. Write the first one below.'}</li>`}</ul>
       <form class="add-step" data-badd="${m.id}"><input name="label" placeholder="Add the next step…" autocomplete="off" aria-label="Add a step to ${esc(m.name)}"><button class="btn sm">Add</button></form>
       ${allTicked && x.status !== 'done' && p.phase === 'pipeline' ? `<div class="all-done">Every step is done. <button type="button" class="btn primary sm" data-bdone="${m.id}">Mark ${esc(m.name)} done</button></div>` : ''}`}
       <a class="ms-panel-more small" href="${msHref(p.id, m.id)}">Open ${esc(m.name)}: files${msBookKind(m) === 'site_walk' ? ', electrician quotes' : ''}, bookings, reminders, due dates ›</a>
@@ -849,7 +865,11 @@ async function renderMilestone(pid, mid) {
           <div class="card-head"><h2>Steps</h2><span class="muted small">${done} of ${steps.length} done</span></div>
           <div class="ms-progress big"><span style="width:${steps.length ? Math.round((done / steps.length) * 100) : 0}%"></span></div>
           ${allDone && x.status !== 'done' && p.phase === 'pipeline' ? `<div class="all-done">Every step is done. <button class="btn primary sm" id="markDone">Mark ${esc(m.name)} done</button></div>` : ''}
-          <ul class="steps">${steps.map((s) => `<li class="${s.done_at ? 'is-done' : ''}">
+          ${doneSteps(steps.filter((s) => s.done_at), (rows) => `<ul class="steps">${rows}</ul>`, (s) => `<li class="is-done">
+              <label class="step-check"><input type="checkbox" data-step="${s.id}" checked><span>${esc(s.label)}</span></label>
+              <span class="step-meta">${esc(s.done_by_name || '')}${s.done_by_name ? ' · ' : ''}${fdate(s.done_at)}</span>
+              <span class="step-tools"><button type="button" class="step-del" data-delstep="${s.id}" title="Remove step" aria-label="Remove step">×</button></span></li>`)}
+          <ul class="steps">${steps.filter((s) => !s.done_at).map((s) => `<li>
               <label class="step-check"><input type="checkbox" data-step="${s.id}" ${s.done_at ? 'checked' : ''}><span>${esc(s.label)}</span></label>
               <span class="step-meta">${s.done_at ? `${esc(s.done_by_name || '')}${s.done_by_name ? ' · ' : ''}${fdate(s.done_at)}`
                 : [dueText(s), s.created_by_name ? `added by ${esc(s.created_by_name)}` : ''].filter(Boolean).join(' · ')}</span>
@@ -858,7 +878,7 @@ async function renderMilestone(pid, mid) {
                 <button type="button" class="step-mv" data-mv="down" data-mvid="${s.id}" title="Move down" aria-label="Move down">↓</button>
                 <button type="button" class="step-mv" data-due="${s.id}" data-dueval="${esc(s.due_on || '')}" title="Set a due date" aria-label="Set a due date">Due</button>
                 <button type="button" class="step-del" data-delstep="${s.id}" title="Remove step" aria-label="Remove step">×</button></span></li>`).join('')
-            || '<li class="muted small">No steps yet. Add the first one below.</li>'}</ul>
+            || `<li class="muted small">${steps.length ? 'Every step is checked off. Add the next one below.' : 'No steps yet. Add the first one below.'}</li>`}</ul>
           <form class="add-step" id="addStep"><input name="label" placeholder="Add the next step for this site…" autocomplete="off"><input type="date" name="due_on" title="Due date (optional)" aria-label="Due date (optional)"><button class="btn sm">Add</button></form>
         </section>
         <section class="card">

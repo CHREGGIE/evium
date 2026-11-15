@@ -804,3 +804,11 @@ h2 { font-size: 15px; }
 /* only the milestone a site is on shows its days */
 .mstep-item .mstep-sub { color: var(--muted); font-weight: 400; }
 .mstep-item.cur .mstep-sub, .mstep-item.s-in_progress.late .mstep-sub, .stage-days { color: #b45309; font-weight: 600; }
+/* checked-off steps tucked away behind an arrow */
+.done-wrap { margin: 0 0 6px; }
+.done-toggle { display: inline-flex; align-items: center; gap: 6px; border: 0; background: transparent; color: var(--muted); font: inherit; font-size: 13px; padding: 4px 6px; border-radius: 6px; cursor: pointer; }
+.done-toggle:hover { background: #f1f5f9; color: var(--ink); }
+.done-caret { display: inline-block; font-size: 11px; transition: transform .15s; }
+.done-wrap.open .done-caret { transform: rotate(90deg); }
+.done-list { display: none; }
+.done-wrap.open .done-list { display: block; border-bottom: 1px dashed var(--line); margin-bottom: 4px; }
